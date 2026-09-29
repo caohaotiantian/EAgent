@@ -32,6 +32,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
+import { replayRun } from "../../src/run/replay.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
 const NOW = 1_700_000_000_000;
@@ -622,4 +623,264 @@ test("A graph.mutated ROW WITH NO MANIFEST — a journal older than the field �
   }
   const out = await r.fresh().engine.cancel(runId, "journal predates the manifest", alice);
   assert.equal(out.status, "cancelled", "cancel binds no graph, so it is still the way out");
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// §A.102 — REPLAY BINDS THE SUCCESSOR TOO.
+//
+// Everything above binds the successor at the GATE doors. `replayRun`'s `refsBound` read
+// `run.compiled`'s manifest only, which names the AUTHORED graph's refs — so a ref a mutation
+// introduced, resolved live when the replay re-adopted the served proposal, could move under a
+// byte-identical hash and manifest, and the replay said `match: true`. Red on `e59a969a`:
+// `a successor the resolver no longer reproduces is not a faithful replay — true !== false`.
+// ---------------------------------------------------------------------------------------------
+
+/** Replay a recorded run on fresh engine options over the resolver a test hands it. */
+const replayWith = (
+  at: { store: StateStore; resolver: ResourceResolver; spec?: GraphSpec; granted?: readonly string[] },
+  runId: RunId,
+  onGraphChange?: "diverge" | "throw" | "allow",
+) =>
+  replayRun({
+    store: at.store,
+    runId,
+    graph: mutCompile({ res: { resolver: at.resolver, bump: () => {} } }, at.spec ?? mutableSpec()),
+    engine: {
+      tools: new ToolRegistry(),
+      functions: new FunctionRegistry(),
+      models: new ModelRegistry(),
+      now: () => NOW,
+      resolver: at.resolver,
+      policy: { granted: [...(at.granted ?? ["graph:mutate"])], systemFloor: "out", budget: { runUsd: 10 } },
+    },
+    ...(onGraphChange === undefined ? {} : { onGraphChange }),
+  });
+
+/** A mutated run, approved to completion — the recording a replay is asked to reproduce. */
+async function recordMutated(r: MutRig): Promise<RunId> {
+  const { runId, gateId } = await parkMutated(r);
+  const out = await approveAs(r, runId, gateId, "record-approve");
+  assert.equal(out.status, "succeeded", JSON.stringify(out.error ?? {}));
+  return runId;
+}
+
+const boundFrames = (report: { frames: readonly { kind: string }[] }) => report.frames.filter((f) => f.kind === "graph.bound");
+
+/**
+ * A run THIS build recorded, copied event by event into a fresh store with each `graph.mutated`
+ * payload passed through `edit` (`undefined` drops the row) — so every served effect is real and
+ * only the successor's record differs.
+ */
+async function agedCopy(
+  from: StateStore,
+  runId: RunId,
+  edit: (payload: Record<string, unknown>) => Record<string, unknown> | undefined,
+): Promise<MemoryStateStore> {
+  const aged = new MemoryStateStore({ now: () => NOW });
+  let seq = 0;
+  for (const ev of await journal(from, runId)) {
+    const payload = ev.type === "graph.mutated" ? edit({ ...(ev.payload as Record<string, unknown>) }) : ev.payload;
+    if (payload === undefined) continue;
+    await aged.append({
+      runId,
+      expectedSeq: seq as never,
+      events: [{ type: ev.type, payload, actor: ev.actor, ts: ev.ts, ...(ev.taskId === undefined ? {} : { taskId: ev.taskId }) } as never],
+    });
+    seq += 1;
+  }
+  return aged;
+}
+
+test("A.102 — REPLAY OF A MUTATED RUN WHOSE ADDED REF MOVED IS NOT match: true", async () => {
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting((ref) => ref.startsWith("oversight/added@")) });
+  const runId = await recordMutated(r);
+  const at = { store: r.store, resolver: r.res.resolver };
+
+  // THE ORDINARY HALF FIRST: nothing moved, and the replay reproduces the run.
+  const clean = await replayWith(at, runId);
+  assert.equal(clean.match, true, `unmoved: ${JSON.stringify(clean.frames.filter((f) => !f.match))}`);
+  assert.equal(clean.graph.match, true, "unmoved: the graph binding holds");
+
+  // THE REF ONLY THE MUTATION NAMED MOVES. `run.compiled`'s manifest does not hold it, so the
+  // authored graph handed to the replay is identical to the recorded one in hash AND manifest.
+  r.res.bump();
+  assert.deepEqual(
+    mutCompile(r, mutableSpec()).resolutionManifest.map((m) => `${m.ref}=${m.digest}`),
+    (await journal(r.store, runId)).flatMap((ev) =>
+      ev.type === "run.compiled" ? (ev as JournalEvent<"run.compiled">).payload.resolutionManifest.map((m) => `${m.ref}=${m.digest}`) : [],
+    ),
+    "precondition: the authored graph's own refs did not move — only the added one did",
+  );
+  const moved = await replayWith(at, runId);
+  assert.equal(moved.match, false, "a successor the resolver no longer reproduces is not a faithful replay");
+  assert.equal(moved.graph.match, false, "and the graph binding says so — the successor IS part of the graph that ran");
+  const frames = boundFrames(moved);
+  assert.equal(frames.length, 1, `one frame, the successor's — the submitted graph is bound: ${JSON.stringify(frames)}`);
+  const frame = moved.frames.find((f) => f.kind === "graph.bound")!;
+  assert.match(frame.expected ?? "", /^oversight\/added@stable=sha256:0{10}…$/, `expected is the recorded successor's digest: ${frame.expected}`);
+  assert.match(frame.actual ?? "", /^oversight\/added@stable=sha256:1{10}…$/, `actual is the moved one: ${frame.actual}`);
+  assert.ok((frame.taskId ?? "").startsWith("propose@"), `the frame names the proposing task: ${frame.taskId}`);
+
+  // `throw` refuses; `allow` forgives it exactly as it forgives a moved `run.compiled` ref, and
+  // still RECORDS it in `graph.match`.
+  await assert.rejects(
+    () => replayWith(at, runId, "throw"),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_REPLAY_DIVERGENCE && /successor/.test(e.message),
+  );
+  const allowed = await replayWith(at, runId, "allow");
+  assert.equal(boundFrames(allowed).length, 0, "allow: no frame");
+  assert.equal(allowed.graph.match, false, "allow: the record still says the graph was not the recorded one");
+});
+
+test("A.102 — A RESOLVER THAT CANNOT READ THE ADDED REF REPORTS IT UNBOUND, not bound", async () => {
+  // The undecidable half: the replay's resolver has no answer for the ref the mutation added.
+  // `compileMutation` does not refuse a `human_gate` whose oversight ref is unresolved — it drops
+  // the ref from the successor's manifest — so the shadow ADOPTS a successor missing it. Before
+  // §A.102 this replayed `match: true`. (Not the CLI's shape: `loom replay` passes no resolver,
+  // and a mutation-added `function` ref then fails the shadow's compile, GRAPH015, moved or not.)
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting() });
+  const runId = await recordMutated(r);
+  const blind: ResourceResolver = {
+    resolve: (ref) => (ref.startsWith("oversight/added@") ? undefined : r.res.resolver.resolve(ref)),
+    document: () => "Instructions.",
+  };
+  const report = await replayWith({ store: r.store, resolver: blind }, runId);
+  assert.equal(report.match, false, "a successor the replay could not resolve is not a reproduced one");
+  const frame = boundFrames(report)[0] as { expected?: string; actual?: string } | undefined;
+  assert.match(frame?.actual ?? "", /^oversight\/added@stable=\(absent\)$/, `named as absent: ${JSON.stringify(frame)}`);
+});
+
+test("A.102 — A journal whose graph.mutated row has NO manifest (older than §G.5) replays UNBOUND", async () => {
+  // Nothing to compare the successor against. The engine refuses to DECIDE on such a run
+  // (`E_GRAPH_MISMATCH`, `unrecorded`, the test above this block's header); a replay certifying it
+  // would be the same undecidable case answered with the passing value. Aged the honest way: a run
+  // THIS build recorded, copied event by event into a fresh store with the field stripped, so
+  // every served effect is real and only the manifest is missing.
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting() });
+  const runId = await recordMutated(r);
+  const aged = await agedCopy(r.store, runId, (payload) => {
+    const { resolutionManifest: _dropped, ...rest } = payload;
+    return rest;
+  });
+  const mutated = (await journal(aged, runId)).filter((ev) => ev.type === "graph.mutated") as JournalEvent<"graph.mutated">[];
+  assert.equal(mutated.length, 1, "precondition: the aged journal holds the mutation");
+  assert.equal(mutated[0]!.payload.resolutionManifest, undefined, "precondition: and no manifest on it");
+
+  // THE CONTROL: the same copy WITH the field replays green, so the copy is not what fails.
+  const control = await replayWith({ store: r.store, resolver: r.res.resolver }, runId);
+  assert.equal(control.match, true, JSON.stringify(control.frames.filter((f) => !f.match)));
+
+  const report = await replayWith({ store: aged, resolver: r.res.resolver }, runId);
+  assert.equal(report.match, false, "an unrecorded successor manifest is not a bound one");
+  assert.equal(report.graph.match, false);
+  const frames = boundFrames(report) as { expected?: string }[];
+  assert.equal(frames.length, 1, JSON.stringify(frames));
+  assert.match(frames[0]!.expected ?? "", /no manifest recorded/, "and the frame says why");
+});
+
+/**
+ * Two canMutate agents in sequence, each proposing its own gate with its own oversight ref, so a
+ * run adopts TWO successors and each `graph.mutated` row carries a different manifest.
+ */
+function twiceMutableSpec(): GraphSpec {
+  const s = mutableSpec() as unknown as { nodes: object[]; edges: object[] };
+  const first = s.nodes[0] as { agent: object };
+  return {
+    ...s,
+    nodes: [first, { ...first, id: "propose2" }],
+    edges: [{ id: "e_seq", from: "propose", to: "propose2", kind: "seq" }],
+  } as unknown as GraphSpec;
+}
+
+function twiceMutEngine(store: StateStore, res: Res): Engine {
+  const models = new ModelRegistry();
+  let call = 0;
+  const gate = (id: string, from: string, ref: string) => ({
+    addNodes: [{ id, type: "human_gate", reads: ["note"], writes: [], humanGate: { ref, approval: { approvers: ["u:alice"] } } }],
+    addEdges: [{ id: `e_${id}`, from, to: id, kind: "seq" }],
+  });
+  models.register(
+    new MockModelAdapter({
+      script: () => {
+        call += 1;
+        const m = call === 1 ? gate("added_gate", "propose", "oversight/added@stable") : gate("added_gate2", "propose2", "oversight/added2@stable");
+        return { text: JSON.stringify({ ok: true, mutation: { reason: "gate it", ...m } }), finishReason: "stop" };
+      },
+    }),
+    true,
+  );
+  return new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions: new FunctionRegistry(),
+    models,
+    now: () => NOW,
+    resolver: res.resolver,
+    policy: { granted: ["graph:mutate"], systemFloor: "out", budget: { runUsd: 10 } },
+  });
+}
+
+test("A.102 — EVERY SUCCESSOR IS BOUND, not only the first: a run that mutated twice", async () => {
+  for (const moves of ["oversight/added2@", "oversight/added@"] as const) {
+    const res = shifting((ref) => ref.startsWith(moves));
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = twiceMutEngine(store, res);
+    const runId = await engine.submit({ graph: mutCompile({ res }, twiceMutableSpec()), inputs: { note: "n" } });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 4 && p.status === "awaiting_gate"; i++) {
+      const open = await engine.openGates(runId);
+      p = await approveAs({ engine }, runId, open[0]!.gateId, `twice-${String(i)}`);
+    }
+    assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+    const rows = (await journal(store, runId)).filter((ev) => ev.type === "graph.mutated") as JournalEvent<"graph.mutated">[];
+    assert.equal(rows.length, 2, "precondition: two successors adopted");
+    assert.deepEqual(
+      rows.map((row) => row.payload.resolutionManifest?.map((m) => m.ref).filter((ref) => ref.startsWith("oversight/")).sort()),
+      [["oversight/added@stable"], ["oversight/added2@stable", "oversight/added@stable"]],
+      "precondition: each row carries its own successor's manifest",
+    );
+
+    const at = { store, resolver: res.resolver, spec: twiceMutableSpec() };
+    const clean = await replayWith(at, runId);
+    assert.equal(clean.match, true, `${moves} unmoved: ${JSON.stringify(clean.frames.filter((f) => !f.match))}`);
+
+    res.bump();
+    const report = await replayWith(at, runId);
+    assert.equal(report.match, false, `${moves} moved: not match`);
+    const frames = boundFrames(report) as { taskId?: string; actual?: string }[];
+    if (moves === "oversight/added2@") {
+      // ONLY THE SECOND successor names the moved ref; the first is bound and says nothing.
+      assert.equal(frames.length, 1, JSON.stringify(frames));
+      assert.ok(frames[0]!.taskId?.startsWith("propose2@"), `the second proposer is named: ${JSON.stringify(frames)}`);
+      assert.match(frames[0]!.actual ?? "", /^oversight\/added2@stable=sha256:1{10}…$/);
+    } else {
+      // The first ref is in BOTH successors' manifests, so both are unbound.
+      assert.deepEqual(frames.map((f) => f.taskId?.split("@")[0]), ["propose", "propose2"], JSON.stringify(frames));
+    }
+  }
+});
+
+test("A.102 — THE PAIRING'S OTHER ARMS: a successor on one side only, or a different successor, is UNBOUND", async () => {
+  // Each arm of `unboundSuccessors` that is not a manifest diff, driven. Journal order pairs the
+  // recording's k-th adoption with the replay's k-th; whatever cannot be paired is not bound.
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting() });
+  const runId = await recordMutated(r);
+  const [row] = (await journal(r.store, runId)).filter((ev) => ev.type === "graph.mutated") as JournalEvent<"graph.mutated">[];
+  const ends = (report: { frames: readonly { kind: string }[] }) =>
+    boundFrames(report).map((f) => [(f as { expected?: string }).expected, (f as { actual?: string }).actual]);
+
+  // THE REPLAY COULD NOT ADOPT IT: the replaying policy withholds `graph:mutate`.
+  const denied = await replayWith({ store: r.store, resolver: r.res.resolver, granted: [] }, runId);
+  assert.deepEqual(ends(denied), [[row!.payload.newHash, "(successor not adopted)"]]);
+
+  // THE RECORDING HAS NO ROW for the successor the replay adopted.
+  const unrecorded = await replayWith({ store: await agedCopy(r.store, runId, () => undefined), resolver: r.res.resolver }, runId);
+  assert.deepEqual(ends(unrecorded), [["(no recorded successor)", row!.payload.newHash]]);
+
+  // THE ROW NAMES A DIFFERENT SUCCESSOR than the one the replay built from the same proposal.
+  const other = `sha256:${"f".repeat(64)}`;
+  const renamed = await replayWith({ store: await agedCopy(r.store, runId, (p) => ({ ...p, newHash: other })), resolver: r.res.resolver }, runId);
+  assert.deepEqual(ends(renamed), [[other, row!.payload.newHash]]);
 });
