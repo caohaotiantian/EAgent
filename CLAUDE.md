@@ -26,18 +26,17 @@ stop rule, 8 nodes, 4 `function` bodies, 11 manifest fixtures (`f43d5a0f`), whos
 second was worth as much as the first; and `examples/graphs/grant-access.json`, temporary access to
 a production resource ROUTED BY CEREMONY: 12 nodes over four node types, 13 edges over three kinds,
 5 `function` bodies, 13 request fixtures (`9ee826a5`; D8 deleted a node and an edge), whose port is
-`docs/workflow-port-2026-09-22b.md`. **The third holds four mechanisms neither other one does** — a
-`router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, a reducer that is neither
-`replace` nor `append_ordered`, and a node reached by two mutually exclusive paths that runs exactly
-once — which is the whole reason it was worth doing: it overlaps port 1 in `human_gate`, `function`,
-`tool`, `fs.*`, `seq` and `replace`, and port 2 in `conditional` besides, and nowhere else.
+`docs/workflow-port-2026-09-22b.md`. **The third holds three mechanisms neither other one does** — a
+`router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, and a node reached by two
+mutually exclusive paths that runs exactly once (a fourth, the `merge_object` reducer, went at
+`43150c24` once §A.94 made it unnecessary), which is why it was worth doing: it overlaps port 1 in
+`human_gate`, `function`, `tool`, `fs.*`, `seq` and `replace`, and port 2 in `conditional`.
 
 **Running the FIRST needed no source change; making it NATURAL needed eight, and THAT is the number
-worth carrying.** All eight friction entries are closed (F1 last, at `51f4a5f`), and the workflow
-now CONSUMES what they built rather than merely no longer suffering it — `triage-plan.js` reads its
-fan-out width off `ctx.node` and refuses on purpose through `{refuse}` (`c2360be`, `f7f74d5`), and
-its suite reads the approver's report out of `loom gates`. **The port is what pulled on them**,
-which is the argument for porting one at all: an invariant nobody exercises names no seam.
+worth carrying.** All eight are closed, and the workflow CONSUMES what they built — `triage-plan.js`
+reads its fan-out width off `ctx.node`, refuses through `{refuse}` (`c2360be`, `f7f74d5`) and reads
+`fs.glob`'s truncation off `"scan:error"` (§A.105). **The port is what pulled on them**: an
+invariant nobody exercises names no seam.
 
 **The second port cost THIRTEEN, and needed no source change either — and the useful number is that
 THREE of the thirteen were ONE mechanism**: `graph/validate.ts` dropped `loop` AND `compensation`
@@ -46,11 +45,10 @@ as if a back-edge were absent while the executor scheduled it. That one mechanis
 five round trips it took to make the graph run, and the diagnostic's own `fix:` line offered two
 routes that both ended at it. **It is CLOSED** — §A.84, `731eca44`/`79cab047`, where `GRAPH010` came
 to rest on DOMINANCE over an edge set that keeps the back-edge, and `harden-config.json` went from
-three warnings to none. Of the other ten, §A.82 (a key-name redactor narrower than the workflow's
-own predicate) is still a row, §A.83 closed at `26a4f358`, and the rest are in the log. **F14 is
-the entry to read**: eight defects in the port's OWN workflow, over four reviews, none found by its
-author, every one *the report asserting something the run had not established* — the defect class
-that workflow exists to prevent, and the receipt for *a builder's own green suite is not evidence*.
+three warnings to none. Of the other ten, §A.82 is still a row. **F14 is the entry to read**: eight
+defects in the port's OWN workflow, over four reviews, none found by its author, every one *the
+report asserting something the run had not established* — the defect class that workflow exists to
+prevent, and the receipt for *a builder's own green suite is not evidence*.
 
 **The third port cost SEVEN, and THREE are closed — first the one that ended in destroyed data with
 exit code 0.** Its lesson: *a workaround for a fail-open guard is a guard, and nobody audited it as
@@ -59,22 +57,19 @@ the ledger* were one event, and the port's defence — `fs.glob`, which answers 
 *nothing here* AND *cannot enumerate* — had the gap's own shape. **D8 closed it at `83f86bec` by
 handing the arm the reason**: `first-grant` reads `"read-ledger:error"` and proceeds on
 `E_FS_NOT_FOUND` alone, the defence is deleted, and the row's `chmod 333` repro went from exit 0
-with a grant destroyed to exit 1 with the ledger's bytes unchanged. Of the other six, §A.91 and
-§A.94 are closed, §A.92 and §A.93 open, one a docs gap `examples/README.md` §10 fills, one a
-canonical-form manifestation in the log. **§4 of that log is NINE defects in the port's own
-workflow, six blocking, five one class** — *a guard nothing distinguishes*: two renewal guards could
-be DELETED with the suite green, and MUTATION found them where reading had not. **A FOURTH port is
-worth as much again.**
+with a grant destroyed to exit 1 with the ledger's bytes unchanged. Of the other six, §A.92 and
+§A.93 are open. **§4 of that log is NINE defects in the port's own workflow, six blocking, five one
+class** — *a guard nothing distinguishes*: two renewal guards could be DELETED with the suite green,
+and MUTATION found them where reading had not. **A FOURTH port is worth as much again.**
 
 **A maintainer's DECISION and an INSTALL PATH outrank both a port and an invariant** (the 2026-09-22b
 assessment; between those two the ranking above holds) — a runtime nobody can install has no
-strangers to exercise it, and the goal's first verb is *install it*. **Both decisions it wanted are
-BUILT:** `DESIGN.md` D8, a node's reserved `"<id>:error"` projection (`83f86bec`), and D9, the
-approval example teaches QUORUM and veto is `two-person-veto.json` (`e9f7fae4`). **The install is
-built, and the publish UNBLOCKED** (`48de87f6`, `9b8377e9`): `@caohaotiantian/loom` 0.1.0 packs,
-installs and runs outside the repo, stays `private: true`, and item 29 closes only on the
-maintainer's publish from a machine with no clone. Owed decisions: after Sequence item 31. Next:
-`docs/handoff-2026-09-24.md` — first a KERNEL defect, §A.101: a late arrival re-runs a committed Task.
+strangers to exercise it, and the goal's first verb is *install it*. Both decisions it wanted are
+BUILT (`DESIGN.md` D8, D9). **The install is built, and the publish UNBLOCKED** (`48de87f6`,
+`9b8377e9`): `@caohaotiantian/loom` 0.1.0 packs, installs and runs outside the repo, stays
+`private: true`, and item 29 closes only on the maintainer's publish from a machine with no clone.
+Owed decisions: after Sequence item 31. Next: `docs/handoff-2026-09-29.md` — first §A.140, a
+join that never fires in a run reported `succeeded` (§A.101, the re-run Task, closed at `d5e4f32a`).
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
@@ -95,7 +90,7 @@ hatch and also the ledger; **read the ledger from `node scripts/check-kernel.mjs
 `feat:`-only; the census counts every subject, merges included. They share ONE definition of a
 trailer — `seamTrailer()`: a `Kernel-seam:` line in the message's own FINAL PARAGRAPH, with
 flush-left continuation lines allowed, which git's `interpret-trailers --parse` rejects and which
-six of the nineteen declared seams are written as. Where they still differ is what "touched the
+seven of the twenty declared seams are written as. Where they still differ is what "touched the
 kernel" means for a MERGE: the requirement reads the commit's own diff (`git show --name-only` —
 empty for a clean merge, the resolution's own changes for an evil one), the census reads its
 effective diff (`-m`, one per parent). So a clean merge cannot violate, its branch having been read
@@ -156,7 +151,8 @@ measured cannot game.
 ladder rested on, out of the CANDIDATE'S OWN graph, so a candidate owned its own outcome, promotion
 ceiling and ground-truth condition (`docs/audit-2026-09-02.md`). Three earlier attempts to pin a
 verifier are at `aabdc63`; each fell to the same shape — a candidate owns both sides of any channel
-its graph produces.
+its graph produces. A fourth, reading what the grader was SERVED rather than the final value and
+static ancestry, shipped at `36f6d065` (§A.29).
 
 **The answer is an operator-attested exam — a grader outside every candidate graph, run by the
 runtime** — designed in `docs/design-property3-2026-09-05.md`, merged at `ec2ad88`. An exam is an
@@ -172,7 +168,11 @@ ordinary `GraphSpec` that `loom exam attest <exam.json> --cohort <id> --as <who>
   names it nowhere; both check NAMES, so an exam naming the channel in `reads` and ignoring it
   still attests. Closing that is a dataflow analysis from each declared input to the terminal node.
 - **The exam-gated doors are `promote --against-cohort` and `suite freeze`.** `promote --suite`
-  still decides on the frozen suite and `12-grader-unchanged`, not on the exam.
+  decides on the frozen suite, `12-grader-unchanged`, and — for a golden channel that differs — the
+  certificate of the graders the operator's freeze named (`evolution/gate.ts` `certification`),
+  checked against what `run/served.ts` folds each grader was SERVED. The frozen grader's strength is
+  the operator's: a grader asserting only a length certifies any value of that length. A
+  strengthened grader is still refused by check 12.
 - **No `subgraph` child grader.** `evaluatorsOf` walks the parent spec's nodes, so an evaluator
   frozen into `RunGraph.subgraphs` is invisible to check 12.
 - **The 60/40 split accepted.** The exam owns the 60% outcome term only, so a cheaper worse
@@ -238,12 +238,12 @@ scripts/           build, pack + install smoke, and the three guards: zero-dep, 
                    exported name set), kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-24.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-29.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-24 wave is merged into `loom`; the handoff says what each lane
-did and left open, and which of its lanes' claims did not survive being re-run.
+Every 2026-09-29 lane is merged into `loom` (item 31's first slice was in flight at settlement);
+the handoff says what each did and left open, and which lane claims did not survive a re-run.
 
 ## Commands
 
