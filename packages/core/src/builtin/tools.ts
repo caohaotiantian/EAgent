@@ -26,7 +26,7 @@
  * on the same file. See `branchRoot`.
  */
 
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Script, createContext } from "node:vm";
@@ -256,7 +256,10 @@ function readRegularBytes(path: string): Buffer {
 }
 
 /** The refusal for something at the path that is not a regular file, naming what it is. */
-function notRegular(st: { isDirectory(): boolean; isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean }): Error {
+function notRegular(
+  st: { isDirectory(): boolean; isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean },
+  verb: "read" | "write" = "read",
+): Error {
   const directory = st.isDirectory();
   const kind = directory
     ? "a directory"
@@ -270,7 +273,7 @@ function notRegular(st: { isDirectory(): boolean; isFIFO(): boolean; isSocket():
             ? "a block device"
             : "not a regular file";
   const code = directory ? "EISDIR" : NOT_REGULAR;
-  return Object.assign(new Error(`${code}: ${kind}, not a regular file; refusing to read it`), { code });
+  return Object.assign(new Error(`${code}: ${kind}, not a regular file; refusing to ${verb} it`), { code });
 }
 
 /** The digest `fs.write` records for a file it CREATED, and `fs.restore` checks before removing it. */
@@ -365,10 +368,30 @@ function writeWithUndo(
   return { created: true, wrote: bytesDigest(bytes), identity };
 }
 
-/** Create-or-truncate and write, through a descriptor the OS opened without following. */
+/**
+ * Create-or-truncate and write, through a descriptor the OS opened without following — and only
+ * ever onto a REGULAR file (`TODO.md` §A.114, the write half of §A.97).
+ *
+ * A blocking `open(O_WRONLY)` of a FIFO waits for a reader that may never come, and the task has
+ * no bound below the node's `timeoutMs`, so the open is NON-BLOCKING (a FIFO with no reader fails
+ * `ENXIO` at once) and the descriptor is `fstat`ed before anything is written: what is not a
+ * regular file is refused with `readRegularBytes`'s own `ENOTREG`. The truncate is an `ftruncate`
+ * AFTER that check rather than `O_TRUNC` on the open, so refusing a kind never alters it. When the
+ * open itself fails, the name is `lstat`ed to say why, exactly as the read side does.
+ */
 function writeLeaf(path: string, body: string): void {
-  const fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC);
+  let fd: number;
   try {
+    fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | NONBLOCK);
+  } catch (e) {
+    const seen = lstatSync(path, { throwIfNoEntry: false });
+    if (seen !== undefined && !seen.isFile() && !seen.isSymbolicLink() && !seen.isDirectory()) throw notRegular(seen, "write");
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw notRegular(st, "write");
+    ftruncateSync(fd, 0);
     writeFileSync(fd, body, "utf8");
   } finally {
     closeSync(fd);
@@ -657,7 +680,21 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
       // Capture what stood at the path so `fs.restore` can put it back — or, when nothing did,
       // record the CREATE so it can remove the file (§A.99). A declared compensation that
       // cannot actually compensate is worse than none.
-      const undo = writeWithUndo(path, String(args["body"]));
+      let undo: ReturnType<typeof writeWithUndo>;
+      try {
+        undo = writeWithUndo(path, String(args["body"]));
+      } catch (e) {
+        // §A.114: something at the path is not a regular file (a FIFO, a socket, a device). Refused
+        // BY KIND, as `fs.read` refuses the same, and typed so an `error` arm can tell it from a
+        // path that is simply absent. Everything else still throws as it always did.
+        if ((e as NodeJS.ErrnoException | undefined)?.code !== NOT_REGULAR) throw e;
+        const content = `cannot write ${rel}: ${(e as Error).message}`;
+        return {
+          content,
+          isError: true,
+          error: err.policy(CODES.E_FS_UNREADABLE, content, { details: { path: rel, errno: NOT_REGULAR } }),
+        };
+      }
       return {
         content: `wrote ${rel}`,
         // `path` stays the RELATIVE path the graph asked for, in both `details` and
