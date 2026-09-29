@@ -37,34 +37,47 @@ lane plan and the owed-decision table). **Amended 2026-09-24:** that plan's five
 hygiene (§H.16–§H.19) closed, so **the publish is unblocked**. Next, in order: **§A.101**, a
 KERNEL defect (a committed Task re-runs on a late arrival) — then item 31's first slice, item 24's
 fold once Q6 is answered, and the fourth port after the publish (`docs/handoff-2026-09-24.md` §6–§7).
+**Amended 2026-09-29:** the six `wave-0929-*` lanes are merged (`393a48f0` … `d5e4f32a`) — §A.101
+CLOSED, item 24 CLOSED by the fold (Q6), §A.102 and eleven more struck; item 31's first slice
+(Lane L) was in flight at settlement time. Next, in order: **§A.140** — a join whose member feeds
+another member never releases and the run says `succeeded`, the fail-open class — with §A.141 (the
+same outcome inside a loop), then the other engine rows, item 31's remainder, and the fourth port
+after the publish (`docs/handoff-2026-09-29.md` §6–§7).
 
 ---
 
-## State — one command each, re-run 2026-09-24 on `7f576a47`
+## State — one command each, re-run 2026-09-29 on `d5e4f32a`
+
+Measured by the settlement in a worktree at `d5e4f32a` (the orchestrator's serialized `npm run
+check` there: exit 0, the same numbers); the settlement's own commits change comments and documents
+only, and the tests were re-run at its tip too (`docs/handoff-2026-09-29.md` §1).
 
 | fact | value | command |
 |---|---|---|
-| the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **4,293 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,162 → 4,293) | `npm test` |
-| pinned exports | **544**, unchanged — the wave added no export. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, **19 declared seams** (17 → 19): `26a4f358` (`feat:`, §A.83's truncation producer, extending D8's seam `6a03694d`) and `4fe87a88` (`fix:` carrying a VOLUNTARY trailer, because `graph.mutated.resolutionManifest` is new journal vocabulary — §G.5). Six of the nineteen are written with flush-left continuation lines that `git interpret-trailers --parse` rejects (`4fe87a88` is the sixth) | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, **69 files**, unchanged | `node scripts/check-zero-dep.mjs` |
+| the gate | **exit 0** (the orchestrator's run; the settlement ran `npm test` and the three guards) | `npm run check` |
+| tests on `loom` | **4,415 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,293 → 4,415) | `npm test` |
+| pinned exports | **544**, unchanged — `run/served.ts` is new and NOT exported. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, **20 declared seams** (19 → 20: `be7aef7c`, `feat(replay)`, the replay report carries the shadow journal — §A.29's seam). Kernel files the wave touched: `run/engine.ts`, `run/projection.ts` (§A.101), `run/replay.ts` (§A.102, §A.29, §A.111); the settlement touched `graph/spec.ts`'s comments only. **Seven** of the twenty are written with flush-left continuation lines that `git interpret-trailers --parse` rejects (6 → 7: `be7aef7c` is the seventh) | `node scripts/check-kernel.mjs`; per seam, `git log -1 --format=%B <sha> \| git interpret-trailers --parse` |
+| zero runtime deps | ok, **70 files** (69 → 70: `run/served.ts`) | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved. The denominator is deliberately not a cell (rule 3) | read every `git ls-files` path; see CLAUDE.md |
-| journal vocabulary | 51 event types, unmoved — `graph.mutated` gained a FIELD (`resolutionManifest`), not a type; §A.83 and §A.96 fold existing rows | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | **62 codes**, unmoved. §A.97 answers with the existing `E_FS_UNREADABLE`; the new refusals of the compiler lane (`GRAPH008_QUORUM_K`'s static arm, `GRAPH003_MALFORMED` for `take: null`, `GRAPH016_BAD_MAPPING` hoisted) are compile diagnostics, not `CODES` members | `Object.keys(CODES).length` |
+| journal vocabulary | 51 event types, unmoved — §A.101 changed what the fold does with a `task.ready`, not the vocabulary, and §A.29's seam is a field of the replay REPORT, not of the journal | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| error vocabulary | **62 codes**, unmoved — §A.114 answers with the existing `E_FS_UNREADABLE` (and §A.129 says why that name now misleads) | `Object.keys(CODES).length` |
 | README's extensibility ledger | **18** and **3**, both unmoved | the two `sed … \| /usr/bin/grep -a -c` commands in `CLAUDE.md` §2 |
-| README's test floor | **3,500+**, unchanged; the probe counts **4,030** `test(` declarations across **378** files (3,899 / 366 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
+| README's test floor | **3,500+**, unchanged; the probe counts **4,086** `test(` declarations across **383** files (4,030 / 378 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
 
-The kernel guard also prints a commits-judged count (981 at `7f576a47`; 904 one wave ago). It is
+The kernel guard also prints a commits-judged count (1,022 at `d5e4f32a`; 981 one wave ago). It is
 deliberately not a cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
-per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-24 wave's lanes
-are `6b1a47eb` (wave-0923-D, install surface), `5c236f55` (wave-0923-B, successor binding),
-`e2e783ca` (wave-0923-A, projection producers), `3731883a` (wave-0923-C-pins, compiler) and
-`0558c2a5` (wave-0923-E, item 24's repro), merged `--no-ff` in that order (`9b8377e9`, `c36bbae7`,
-`0420f95b`, `013e7d5e`, `7f576a47`) with zero conflicts — the TENTH wave running.
-`docs/handoff-2026-09-24.md` is the current handoff; `docs/handoff-2026-09-23.md` is the one before
+per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-29 wave's lanes
+are `d33d7ca4` (wave-0929-m, the examples' debts and `fs.write`), `89d9a09c` (wave-0929-p, the CLI
+doors and `pack.mjs`), `b0e6a380` (wave-0929-c2, a subgraph's mapping shape), `b10bdefd`
+(wave-0929-n, replay binds successors), `0fd272aa` (wave-0929-f, item 24's fold) and `5486458f`
+(wave-0929-k, §A.101), merged `--no-ff` in that order (`393a48f0`, `be8e3ce9`, `45c8344b`,
+`68b5da77`, `8a6c2eba`, `d5e4f32a`) with zero conflicts — the ELEVENTH wave running; for each,
+`git merge-tree --write-tree <merge>^1 <merge>^2` exits 0 and equals the merge's own tree (re-run
+for this settlement). Lane L (item 31's first slice) was not merged at settlement time.
+`docs/handoff-2026-09-29.md` is the current handoff; `docs/handoff-2026-09-24.md` is the one before
 it.
 
 ## Row census — three commands, run on this file
@@ -83,7 +96,10 @@ at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — an
 `7f576a47` (170 rows, 103 struck), the 2026-09-24 wave's merge, whose lanes closed seventeen rows
 but struck none — every strike is the settlement's — and **82** after that settlement
 (203 rows, 121 struck: seventeen closed, thirty-three opened, and one of those, §A.124, withdrawn
-by the settlement's review as a false premise). The 2026-09-22b
+by the settlement's review as a false premise); **82** again at `d5e4f32a`, the 2026-09-29 wave's
+merge (203 rows, 121 struck — its lanes closed fourteen rows and struck none), and **86** after that
+settlement (222 rows, 136 struck: fourteen struck, nineteen opened, and one of those, §A.128, filed
+already CLOSED because it opened and closed inside the wave). The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -107,14 +123,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 126 | 75 | 51 | **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SEVEN (§A.101–§A.127, the last found by the settlement itself; §A.124 then WITHDRAWN, its premise false), so open went 37 → 51 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 144 | 86 | 58 | **2026-09-29: the `wave-0929-*` lanes CLOSED TEN (§A.29 — item 24, by the fold — §A.101, §A.102, §A.105, §A.111 by argument, §A.114, §A.122, §A.125, §A.126, §A.127) and their residue OPENED EIGHTEEN (§A.128–§A.145, §A.128 filed closed), so open went 51 → 58. §A.140 is HIGH and fail-open — a join whose member feeds another member never fires and the run says `succeeded`, pre-existing, excluded by Lane K's oracle "on its own row" when no row existed — and is the next wave's first lane.** **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SEVEN (§A.101–§A.127, the last found by the settlement itself; §A.124 then WITHDRAWN, its premise false), so open went 37 → 51 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 2 | 5 | field-survey work the redesign creates; **§G.5 CLOSED WHOLE 2026-09-23 at `4fe87a88`** (Sequence item 18) |
-| §H | 27 | 19 | 8 | **2026-09-24: §H.16–§H.19 CLOSED at the install-surface lane's merge (`9b8377e9`), which unblocks the publish; §H.21–§H.26 OPENED as its residue — in the settlement's reading, none a reason to hold the publish.** housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs. **§H.20 CLOSED 2026-09-23 at `39c5e0b5`** — each leaking suite now removes its roots in a module-level `after` |
+| §H | 28 | 23 | 5 | **2026-09-29: §H.21, §H.22, §H.23 and §H.26 CLOSED (Lane P, `be8e3ce9`); §H.27 OPENED (`pack.d.mts` does not declare `runPack`).** **2026-09-24: §H.16–§H.19 CLOSED at the install-surface lane's merge (`9b8377e9`), which unblocks the publish; §H.21–§H.26 OPENED as its residue — in the settlement's reading, none a reason to hold the publish.** housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs. **§H.20 CLOSED 2026-09-23 at `39c5e0b5`** — each leaking suite now removes its roots in a module-level `after` |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -335,8 +351,31 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
 - ~~**A.28 · A saturated outcome ranks cheapness.**~~ CLOSED by `a0f0cec` — `outcomeSpread` measures
   the saturation and `isGolden` condition 2 refuses the rank on it. What cannot be fixed here stands:
   a workflow whose only signal is human approval cannot rank its own runs.
-- **A.29 · A frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN
-  verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression.** Repro:
+- ~~**A.29 · A frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN
+  verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression.**~~
+  **CLOSED 2026-09-29 at `36f6d065` … `0fd272aa`, with the seam `be7aef7c` (Lane F, merged
+  `8a6c2eba`) — by the FOLD, the maintainer's Q6.** `run/served.ts` (new, not kernel, not exported)
+  answers *"what did channel C hold when task T read it"*: the kernel's `foldRun` over the replay's
+  shadow journal (`ReplayReport.replayedEvents`, the seam) through T's last lease, read through
+  `viewFor`. A golden case's differing pinned channel now passes only when EVERY frozen grader
+  reading it — which the freeze names by identity and SITE (its NodeSpec, its outbound edges, the
+  specs of the channels it reads) — ran once, at iteration 0, on the root branch, with no gate, hook
+  or prior mutation; is not a host-code body (`ReplayReport.liveBodies`); passed on all its own
+  verdicts; and was SERVED the kept value and the recorded inputs. Re-run for this settlement at
+  `d5e4f32a`:
+  ```
+  $ node --test packages/core/test/evolution/a29-verifier-certified-refused.test.ts
+  ✔ §A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS PROMOTED — the golden pin is waived on the frozen grader's word
+  ✔ CONTROL · a candidate that really drops items is still refused at Δ -33.3pp, and the reason says the frozen grader did not pass it
+  ℹ pass 2
+  ```
+  The green-is-wrong pin FLIPPED: the certified candidate promotes (30/30, exit 0) and the control
+  stays refused. Games A, A′, C and G re-driven and refused (`a29-served-certificate.test.ts` → 20
+  pass, `run/served.test.ts` → 2 pass); 34 mutations all red; an independent gaming review promoted
+  no garbage from a candidate graph. **One sentence below is FALSE and is corrected here rather than
+  carried:** *"DESIGN item 20 is the second customer for that fact"* — item 20 (§B.2) closed at
+  `fa25cc7` by DELETING `task.started`, and nothing there reads a per-task ordering. Residue:
+  §A.137, §A.138, §A.139; §A.128 was opened and closed with it. The row as it stood follows. Repro:
   `/usr/bin/grep -anc 'task.started' packages/core/src/journal/events.ts` → 3 — but the three hits
   are now PROSE ABOUT THE DELETION (`fa25cc7`, §B.2), not a declaration. The name is gone from
   `EVENT_TYPES`; the count survived its own subject, which is why the repro is kept and re-read
@@ -2897,6 +2936,8 @@ the four still open; of §A.95–§A.100, filed below by the 2026-09-23 settleme
   The parent-name half now runs above every `continue`. Only the names were hoisted: hoisting
   `requiredMapping` too broke three fixtures in `retry-default-policy.test.ts` that declare no
   mapping. Repro: `node --test packages/core/test/graph/subgraph-parent-mapping.test.ts` → 5 pass.
+  *(Amended 2026-09-29: the two sentences above are stale since `b0e6a380` — the SHAPE check is
+  hoisted too, which is §A.122's closure, and the suite now holds 10 tests.)*
   Residue: §A.122. The row as it stood follows. *(D8 phase one review, F4b; pre-existing, same on
   the `ab1654f7` binary.)* File:
   `graph/validate.ts` — nothing checks the VALUES of `subgraph.inputs` against `spec.channels`, and
@@ -3006,8 +3047,36 @@ orchestrator's record of the lanes' reports and reviews, plus one the settlement
 such, and their first task is the re-run.** §A.101 is the one to read first: a KERNEL defect,
 reproduced on the pre-wave base `2af9716a` by two agents independently, and again here.
 
-- **A.101 · A committed Task RE-RUNS when a second arrival reaches it late — same Task id, both
-  writes applied.** *(HIGH, kernel. Found by the compiler lane while building §A.94/§A.95; re-run.)*
+- ~~**A.101 · A committed Task RE-RUNS when a second arrival reaches it late — same Task id, both
+  writes applied.**~~
+  **CLOSED 2026-09-29 at `04e3f12c`, `de16b2ea`, `364b17fb`, `87f7666b`, `624fd9b6`,
+  `5486458f` (Lane K, merged `d5e4f32a`).** The fold ignores `task.ready` on a terminal Task;
+  `#activate` writes no arrival at an existing Task and mints no barrier Task for a `join` edge or an
+  ordinary edge into a join node; **`#maybeFireJoin` is DELETED** — every join but the empty fan's
+  (`#fireEmptyJoin`) releases in `#releaseSettledBarriers`: ONE asker, between waves, on the
+  post-commit projection, the most upstream join node first, one node per pass. Nothing releases
+  while the run is bound to fail on a non-member (`#failingOutside`), and a barrier that policy holds
+  holds every join behind it. Re-run for this settlement on `packages/core/dist/bin.js` built at `d5e4f32a`, the row's own graph:
+  ```
+  $ loom run graphs/rearrival.json --input '{"seed":"x"}'   → exit=0  "status": "succeeded"
+  "log":["a","c","b","c2","c3"]                                    ← b once
+  $ loom trace <runId> | /usr/bin/grep -a 'task b '       →  loom.task b root [ok] 3ms
+  $ loom replay <runId>                                    →  "match": true
+  ```
+  and the barrier the fix had to carry (`start→m` beside `start→a→a1→a2→m`, `m -join→ J → done`):
+  `"log":["start","a","m","a1","a2","done"]`, one `[ok]` span each for `J` and `done`, replay
+  `match: true`. The lane's oracle, 3,000 seeds × 1–4 joins, 22,856 runs: double commit 0 (base
+  4,838), early or double release 0, no-member release 0, strand-in-`succeeded` 0 (base 386),
+  parallelism-dependence 0 (base 206); 1,053 journal cuts re-driven in a fresh engine, 0 bad (base
+  186); 107 example cases identical to base. Pins: `node --test
+  packages/core/test/run/rearrival-runs-once.test.ts` → 69 pass, `run/barrier-release-oracle.test.ts`
+  → 1 pass. Tests changed: `join-modes.test.ts` par 3 → 1 (timing only, reviewer-confirmed over 96
+  mode/par rows); five in `error-projection-multiplicity`/`outcome-exclusive-writers` rewritten —
+  the shapes are still refused at compile and now shown to run once. An old journal holding a
+  re-arrival replays `match: false` on this binary, its final fold differing only in `edgesIn`
+  (accepted under §A.111). **The oracle's I4 excluded one strand "on its own row", and no such row
+  existed: it is §A.140, HIGH** — a join where one member feeds another never releases and the run
+  says `succeeded`. Residue: §A.140–§A.145. The row as it stood follows. *(HIGH, kernel. Found by the compiler lane while building §A.94/§A.95; re-run.)*
   Files: `packages/core/src/run/projection.ts`, the `task.ready` arm, which upserts state `"ready"`
   UNCONDITIONALLY, and `packages/core/src/run/engine.ts`, `#activate`, which emits one `task.ready`
   per inbound edge. When a node's two arrivals do not coincide — the second path at least two hops
@@ -3031,8 +3100,26 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   distinct fact), with all three shapes pinned — the duplicated write, both arms, the stale
   projection. A `fix:` to kernel files; the first lane of the next wave.
 
-- **A.102 · `replay` does not check the successor's manifest, so a mutated run whose added ref
-  MOVED replays `match: true`.** *(Lane B, successor binding, §G.5's closure; not re-run here.)*
+- ~~**A.102 · `replay` does not check the successor's manifest, so a mutated run whose added ref
+  MOVED replays `match: true`.**~~
+  **CLOSED 2026-09-29 at `6f7d2c8a`, `8d13dadf` (`replay.ts`), `a79591d5` (`cli.ts`),
+  `b10bdefd` (pin) — Lane N, merged `68b5da77`.** `replayRun` binds every `graph.mutated` successor
+  against the shadow's own row (`unboundSuccessors`): a moved or absent ref, a different hash, a
+  one-sided row, or no manifest (pre-`4fe87a88`) → a `graph.bound` frame naming the proposer,
+  `match: false`; `"throw"` refuses after the shadow. `loom replay` and `promote --suite` now pass the
+  workspace resolver. **The row's own measurement did not reproduce through the binary**: before
+  `a79591d5` a mutation-added `function` replayed `GRAPH015_RESOURCE_NOT_FOUND`, exit 1, edited or
+  not, because the CLI passed no resolver — Lane B's "`match: true`" was not a binary measurement.
+  Re-run for this settlement on `packages/core/dist/bin.js` built at `d5e4f32a`, the pin's first case written to disk, one process per verb:
+  ```
+  $ loom run graphs/mutable.json … --grant graph:mutate   exit=0 status=awaiting_gate
+  $ loom approve <runId> <gate> --as u:alice             exit=0 status=succeeded
+  $ loom replay <runId>   (unedited)                     exit=0 match=true
+  $ loom replay <runId>   (added.js edited)              exit=1 match=false
+  ✗ graph.bound propose@root#0: expected function/added@stable=sha256:0098e14115…, got function/added@stable=sha256:7d85b8ce51…
+  ```
+  Pins: `node --test packages/core/test/run/graph-binding.test.ts` → 17 pass (11 → 17),
+  `test/cli/replay-mutated-run.test.ts` → 4 pass. Residue: §A.133, §A.134. The row as it stood follows. *(Lane B, successor binding, §G.5's closure; not re-run here.)*
   File: `packages/core/src/run/replay.ts`. §G.5 made `graph.mutated` carry `resolutionManifest` and
   every GATE door check it; `replayRun`'s `refsBound` still reads only `run.compiled`'s. Lane B's
   measurement: a journal written by this build, a mutation-added ref's resource edited, `loom replay`
@@ -3056,7 +3143,23 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   only its boundary. **Closes when** both are checked at the door, or the boundary is argued at
   `#assertBound`'s docstring.
 
-- **A.105 · `fs.glob` and `fs.grep` still write their cap LINE into the content, beside the fact.**
+- ~~**A.105 · `fs.glob` and `fs.grep` still write their cap LINE into the content, beside the fact.**~~
+  **CLOSED 2026-09-29 at `f2a732b4` (Lane M, merged `393a48f0`).** Both tools return the
+  bare listing and keep `details.truncated`; `triage-plan.js` reads `"scan:error"` (added to `plan`'s
+  `reads` in `triage-failures.json`) and refuses on anything but `{ok: true, truncated: false}` —
+  including a graph that hands it no projection. Re-run for this settlement on `packages/core/dist/bin.js` built at `d5e4f32a`, a copy of
+  `examples/` with `maxFanout` and the `fan` edge's `maxWidth` raised to 128 and 101 report files:
+  ```
+  $ /usr/bin/grep -an 'truncated at' packages/core/src/builtin/tools.ts     → (nothing)
+  $ loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}'
+  exit=1  "status": "failed"  "code": "E_FUNCTION_REFUSED"
+  … listing was TRUNCATED, so these 100 paths are not all of them. …
+  out/triage.md: ABSENT
+  journal rows: 'truncated at' → 0, "truncated":true → 1, shard-100 → 0
+  ```
+  Pins: `examples-triage.test.ts` → 16 pass, `builtin/fs-search.test.ts` → 17 pass. The lane's
+  reviewer mutated the guard to `if (false)`: the run went to `awaiting_gate` triaging 100 files as
+  all of them, and two `examples-triage` tests went red. Residue: §A.131. The row as it stood follows.
   *(Lane A, §A.83's residue; re-run, and restated in the settlement's review round.)* File:
   `packages/core/src/builtin/tools.ts`. The FACT is already where §A.83 put the others': both tools
   have carried `details.truncated` since `98133524` (`:1130`, `:1284`; asserted at
@@ -3106,7 +3209,20 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   learns the child's rollback (engine + journal vocabulary — a seam), or a reader is shown unable to
   run after it.
 
-- **A.111 · Journals written before `26a4f358` replay `match: false`.** *(Lane A; not re-run here.)*
+- ~~**A.111 · Journals written before `26a4f358` replay `match: false`.**~~
+  **CLOSED 2026-09-29 BY ARGUMENT — the maintainer's decision: no journal compatibility
+  before 0.1.0.** The argument is written above `compare` in `packages/core/src/run/replay.ts`
+  (Lane F, `be7aef7c`; corrected at `6b827418`): the package is `private: true` and unpublished, so no operator holds a
+  pre-release journal; naming "a build boundary" in replay would need a durable build identity on
+  every journal — new `journal/events.ts` vocabulary for journals that exist only here; the promise
+  starts at the first publish, after which a fold change that moves an old journal's projection is
+  a versioned breaking change, not a row. Re-read: `/usr/bin/grep -an 'A.111'
+  packages/core/src/run/replay.ts` → `1483: … not a defect this function owes an excuse for
+  (`TODO.md` §A.111, decided by the maintainer`. **What the same argument covers, named so nobody is
+  surprised:** a journal holding a §A.101 re-arrival replays `match: false` on a build after
+  `d5e4f32a`, and a suite frozen before §A.101 over such runs — or over a base strand the tip now
+  releases — can fail `promote --suite`: 28 of 112 cross-binary fuzz journals replayed `false`
+  (Lane K's review). No row is carried for it. The row as it stood follows. *(Lane A; not re-run here.)*
   The fold now adds `truncated`/`bytes` to the projection, so an older journal's replay differs; and
   an AGENT journal before `a2f5244a` with a truncated tool result differs because the model request
   now carries the in-band note. No journal outside this repository exists (item 29 is unpublished).
@@ -3129,7 +3245,20 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   such a task cannot run. **Closes when** the identity is not positional, or the over-refusal is
   argued at the rule.
 
-- **A.114 · `fs.write` to a FIFO still hangs the run.** *(Lane A; §A.97's other half; re-run by
+- ~~**A.114 · `fs.write` to a FIFO still hangs the run.**~~
+  **CLOSED 2026-09-29 at `d33d7ca4` (Lane M, merged `393a48f0`).** `fs.write` opens
+  `O_WRONLY|O_CREAT|O_NONBLOCK`, `fstat`s, refuses a non-regular leaf `E_FS_UNREADABLE` (`policy`,
+  `ENOTREG`), and truncates only after the `fstat`. Re-run for this settlement on `packages/core/dist/bin.js` built at `d5e4f32a`,
+  `examples/graphs/guarded-write.json` with `mkfifo notes/note.txt` and no reader:
+  ```
+  exit=1 after 126 ms
+  "class": "policy", "code": "E_FS_UNREADABLE", "details": {"errno": "ENOTREG", "path": "notes/note.txt"}
+  "message": "cannot write notes/note.txt: ENOTREG: a FIFO, not a regular file; refusing to write it"
+  ```
+  (base: hung until the alarm, 142). The reviewer's table: a socket and a FIFO WITH a reader are
+  refused too; a symlink, a dangling link, a read-only file, a directory and a same-bytes rewrite
+  behave as on base; §A.99's late-veto create-undo re-driven, the file ABSENT, `compensated`. Pin:
+  `builtin/tools.test.ts` → 63 pass. Residue: §A.129 (driven), §A.130. The row as it stood follows. *(Lane A; §A.97's other half; re-run by
   reading.)* File: `packages/core/src/builtin/tools.ts` — `openLeaf(path, O_WRONLY | O_CREAT | …)`
   at `:351` and `:370`, no `O_NONBLOCK`. **Closes when** `fs.write` refuses a non-regular leaf before
   it blocks, as `fs.read` does since `b2bcc9ab`.
@@ -3173,8 +3302,18 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   `tool.called` (`:969`), never pruned. **Closes when** it is
   bounded (entries dropped once no rollback can reach them) or the bound is argued.
 
-- **A.122 · An ABSENT `subgraph.inputs`/`outputs` on an unresolved child compiles silent and
-  crashes at run time.** *(Lane C, §A.98's residue; not re-run here.)* `Object.entries(sub.inputs)`
+- ~~**A.122 · An ABSENT `subgraph.inputs`/`outputs` on an unresolved child compiles silent and
+  crashes at run time.**~~
+  **CLOSED 2026-09-29 at `b0e6a380` (Lane C2, merged `45c8344b`).** `requiredMapping`
+  runs above every `continue` in `rule016Subgraphs`, so an absent or non-object `subgraph.inputs` /
+  `outputs` is `GRAPH003_MALFORMED` whatever the child resolves to. **The crash was narrower than
+  this row said**: `E_INTERNAL` (a `TypeError` in `#runSubgraph`) only for a resolver whose
+  `subgraph()` answer changes between calls; with a consistent resolver base already failed typed,
+  `E_RESOURCE_NOT_FOUND`. Newly refused: one test fixture (`retry-default-policy.test.ts`'s
+  `nodeZooSpec`, now given `inputs: {}` and `outputs: {}`), no shipped example. The same change fixed
+  a vacuous §A.98 depth assertion. Repro: `node --test
+  packages/core/test/graph/subgraph-parent-mapping.test.ts` → 10 pass. Residue: §A.135, §A.136, and
+  one more member of §A.123. The row as it stood follows. *(Lane C, §A.98's residue; not re-run here.)* `Object.entries(sub.inputs)`
   on `undefined`, at `packages/core/src/run/engine.ts:9679` inside `Engine.#runSubgraph`. Pinned as residue in `test/graph/subgraph-parent-mapping.test.ts` ("ONLY THE
   NAMES MOVED"). **Closes when** the compiler refuses a `subgraph` node missing either block
   whatever the child resolves to, and that pin flips.
@@ -3183,7 +3322,9 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   here.)* `packages/core/src/graph/mutate.ts:381–391` recompiles the merged spec, and a child
   subgraph compiles at run time — so a run begun before §A.77, §A.88 or §A.98 landed can be refused
   mid-flight by the build that resumes it. Refusing is allowed; stopping a live run is a product
-  decision. **Closes when** the maintainer decides whether a resumed run compiles under its RECORDED
+  decision. *(2026-09-29, Lane C2's note, not re-run: §A.122 is one more member — a run begun on a
+  build before `b0e6a380` whose frozen child holds a `{ref}`-only `subgraph` node can be refused at
+  `#compileChild`.)* **Closes when** the maintainer decides whether a resumed run compiles under its RECORDED
   build's rules or the current one, and the answer is pinned.
 
 - ~~**A.124 · `loom gates` says "Publish the graph this run used to see what is being approved" even
@@ -3201,22 +3342,43 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   claim was kept. "Re-run by reading" read the line and not its guard. The id is kept, as every id
   is. *(Filed from the orchestrator's fact sheet, which carried Lane D's reviewer's note.)*
 
-- **A.125 · `sanitizeDiagnosticMessage` misses bidi controls, and three vectors print raw control
-  characters.** *(Lane D's final review, pre-existing vectors; re-run by reading.)*
+- ~~**A.125 · `sanitizeDiagnosticMessage` misses bidi controls, and three vectors print raw control
+  characters.**~~ **CLOSED 2026-09-29 at `2bfd2bfe`, `6200eb2f` (Lane P, merged `be8e3ce9`).**
+  `sanitizeDiagnosticMessage` strips a `SPOOFING_CLASS` — U+200E/F, U+2028/9, U+202A–E, U+2066–9 and
+  U+061C — and caps by code points, and every file-sourced string the resolver prints goes through
+  it, the success line included. The reviewer fuzzed 200k cases: idempotent, never threw. Pins:
+  `node --test packages/core/test/cli/diagnostic-wrap.test.ts` → 17 pass,
+  `cli/resolve-recorded-graph.test.ts` → 10 pass. The row as it stood follows. *(Lane D's final review, pre-existing vectors; re-run by reading.)*
   `packages/core/src/cli.ts:6999–7001` strips `[\u0000-\u001f\u007f-\u009f]` only, so U+202E and
   U+2066–U+2069 pass; a candidate's PATH, a graph NAME in the different-hash list and an invalid-JSON
   parser message quoting file bytes are printed unsanitised; the cap slices UTF-16 and can split a
   surrogate pair, and is unpinned; `noGuessAdvice` is pinned at `suite freeze` only. **Closes when**
   every string the resolver prints from a file goes through one sanitiser covering those, pinned.
 
-- **A.126 · Two losses in the by-hash refusal.** *(Lane D's final review, "N8"; not re-run here.)*
+- ~~**A.126 · Two losses in the by-hash refusal.**~~
+  **CLOSED 2026-09-29 at `2bfd2bfe`, `6200eb2f` (Lane P).** `details.searched` is restored —
+  as the directory list — on the six throwing callers, and `exam attest` resolves the cohort's graph
+  before it loads and judges the exam. **The `loom score` half was a NON-DEFECT and did not
+  reproduce**: the resolver runs before every check but the preconditions, so nothing masks it.
+  Pin: `node --test packages/core/test/cli/resolve-recorded-graph.test.ts` → 10 pass (6 → 10).
+  Residue: §A.132. The row as it stood follows. *(Lane D's final review, "N8"; not re-run here.)*
   In `loom score` and `loom exam attest` an earlier check's ORDER can mask the resolver's refusal;
   and the refusal's structured `details` no longer carry `searched`, the directories the message
   names. **Closes when** both verbs resolve first (as `suite freeze` now does) and `details.searched`
   is restored, pinned in `resolve-recorded-graph.test.ts`.
 
-- **A.127 · `grant-access.json` still ships §A.94's workaround, and its label still describes a
-  refusal that no longer happens.** *(Found by this settlement; re-run.)* File:
+- ~~**A.127 · `grant-access.json` still ships §A.94's workaround, and its label still describes a
+  refusal that no longer happens.**~~
+  **CLOSED 2026-09-29 at `43150c24` (Lane M, merged `393a48f0`).** `history` is
+  `{"type": "object", "reduce": "replace"}` and `labels.residue-error-arm` is deleted; `loom
+  compile`'s output is byte-identical to base (`ok`). Re-run: `node -e` over the shipped graph →
+  `history` `replace`, five labels; `node --test packages/core/test/examples-grant.test.ts` → 35
+  pass. **A consequence no lane listed**: no shipped example now uses a reducer other than `replace`
+  and `append_ordered` — `/usr/bin/grep -arhoE '"reduce": *"[a-z_]+"' examples | sort | uniq -c` →
+  9 `append_ordered`, 81 `replace` — so the "four mechanisms" `CLAUDE.md` credited port 3 with are
+  three; this settlement corrects `CLAUDE.md`, `examples/README.md` (§10 and its table) and dates a
+  note into `docs/workflow-port-2026-09-22b.md`. Residue, left:
+  `packages/core/test/examples-grant.test.ts:331`'s comment still reasons in `merge_object`. The row as it stood follows. *(Found by this settlement; re-run.)* File:
   `examples/graphs/grant-access.json` — `history` is `merge_object` with `onConflict:
   "last_by_branch"`, and `labels.residue-error-arm` says *"The compiler cannot see that:
   `GRAPH010_CONCURRENT_WRITE` … refuses `replace`"*. On `packages/core/dist/bin.js` at `7f576a47`, the
@@ -3225,6 +3387,146 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   when** the shipped graph uses `replace`, the label is deleted, and `test/examples-grant.test.ts`
   still passes over every ending.
 
+
+- ~~**A.128 · A baseline case that could not reproduce ITS OWN recording counted as a baseline
+  failure, lowering `2-non-inferior`'s bar.**~~ **CLOSED 2026-09-29 at `36f6d065` (first cut) and
+  `0fd272aa` (Lane F, merged `8a6c2eba`) — opened and closed in one wave, filed so the id exists.**
+  *(Found by Lane N's review as "A.NEW-2".)* File: `packages/core/src/evolution/gate.ts`. A
+  BASELINE case whose replay could not reproduce its own recording — the baseline graph IS the
+  recorded graph, and the replay said `match: false` or threw — counted in the baseline's pass rate
+  as a failure, so a baseline that could not replay itself set a LOWER bar for the candidate. Such a
+  case now counts as a baseline pass; a `--baseline` the operator chose differently is measured as it
+  is (`CaseResult.recordedGraph`, set for a thrown replay too). Keyed — the orchestrator's decision —
+  on "the baseline graph IS the recorded graph", not on `graph.match`. Repro: `node --test
+  packages/core/test/evolution/a29-served-certificate.test.ts` → 20 pass, its two `A.NEW-2` tests
+  among them.
+
+- **A.129 · `E_FS_UNREADABLE` now names a WRITE refusal, and a directory at a write path is still
+  untyped and retryable.** *(Lane M's review, §A.114's residue; re-run by driving.)* Files:
+  `packages/core/src/errors.ts:350–352` documents the code as *"`fs.read` could not read it"*; since
+  `d33d7ca4` `fs.write` onto a FIFO or a socket answers it. On the same write `EISDIR` and `EACCES`
+  still throw untyped. Driven for this settlement on `packages/core/dist/bin.js` built at `d5e4f32a`,
+  `examples/graphs/guarded-write.json`:
+  ```
+  notes/note.txt a FIFO        → "class": "policy",      "code": "E_FS_UNREADABLE",           "retryable": false
+  notes/note.txt a directory   → "class": "unavailable", "code": "E_TOOL_SOURCE_UNAVAILABLE", "retryable": true,
+                                 "message": "Error: EISDIR: illegal operation on a directory, open '…/notes/note.txt'"
+  ```
+  So under a retry policy a directory at the write path is retried and a FIFO is not. **Closes when**
+  the code is documented as read-or-write (or an `E_FS_UNWRITABLE` exists — a `CODES` member, so a
+  seam) and `fs.write` maps `EISDIR`/`EACCES`/`EPERM`/`ELOOP` to typed refusals, pinned.
+
+- **A.130 · `fs.restore` onto a non-regular leaf throws a bare `ENOTREG`.** *(Lane M's review; not
+  re-run here.)* File: `packages/core/src/builtin/tools.ts`, `fs.restore`. It no longer hangs (since
+  `d33d7ca4`) but the error is untyped, and no test pins restore onto a FIFO. **Closes when** it
+  answers a typed refusal, pinned.
+
+- **A.131 · An agent handed a capped `fs.glob`/`fs.grep` listing is told a BYTE count.** *(Lane M's
+  review, §A.105's residue; re-run by reading.)* File: `packages/core/src/run/engine.ts:779–786`,
+  `modelToolContent`: the note is `[truncated by the tool: N bytes shown; the rest was not
+  returned]`, with `of M` only when `details.bytes` is a number — which a listing never carries —
+  and no advice to narrow the pattern, now that §A.105 removed the line that gave it. **Closes
+  when** a listing's truncation note speaks entries and says to narrow the pattern, pinned beside
+  `run/agent-tool-truncation.test.ts`.
+
+- **A.132 · `exam attest`, `suite freeze` and `promote --against-cohort` carry no `details.failed`.**
+  *(Lane P's review; not re-run here.)* Their messages name the failed candidate; their structured
+  `details` do not. **Closes when** each carries it, pinned in `resolve-recorded-graph.test.ts`.
+
+- **A.133 · `promote --suite` passes no `payloads` to `replayRun`; `loom replay` does.** *(Lane N's
+  review; not re-run here.)* File: `packages/core/src/evolution/gate.ts:358`, `runCase`. A recording
+  whose payloads are externalised can replay differently under the gate than under `loom replay`.
+  **Closes when** both doors hand `replayRun` the same engine options, or the difference is argued
+  at `runCase`.
+
+- **A.134 · A parked or cancelled GATED run is unreplayable, and four `two-person-veto` answer
+  orders replay `match: false`.** *(Lanes N and K's reviews; pre-existing on base and tip alike; not
+  re-run here.)* File: `packages/core/src/run/replay.ts`. `E_REPLAY_DIVERGENCE: replay raised a gate
+  … never decided` for a run parked or cancelled at a gate (e.g. `triage-failures` parked); and the
+  orders `carol,bob,alice:AAR`, `carol,bob,alice:RAA`, `bob,carol,alice:AAR`, `bob,carol,alice:ARA`
+  replay `match: false`. **Closes when** a replay of an undecided gate reports the gate as the run's
+  last state instead of diverging, and the four orders replay `match: true`, pinned.
+
+- **A.135 · A `subgraph.ref` resolving to a resource of ANOTHER kind compiles clean and fails at run
+  time.** *(Lane C2, "R1"; not re-run here.)* `prompt/p@stable` as a `subgraph.ref` → `ok` at compile,
+  `E_RESOURCE_NOT_FOUND` at run. **Closes when** a resolving ref whose `subgraph` hook answers no
+  `GraphSpec` is refused at compile whenever a hook exists.
+
+- **A.136 · The validator and `compile.ts` each ask `resolver.subgraph(ref)`, and nothing requires
+  the answers to agree.** *(Lane C2, "R2"; not re-run here.)* So a child only the SECOND call sees
+  is frozen unvalidated — the mechanism of §A.122's crash. **Closes when** compile resolves each
+  child once and validates what it freezes.
+
+- **A.137 · A pinned channel no frozen grader reads keeps its byte pin.** *(Lane F; not re-run
+  here.)* File: `packages/core/src/evolution/gate.ts`, `certification`. A scratch or intermediate
+  channel no grader reads cannot be certified, so an honest candidate that changes one is refused.
+  Fail-closed. **Closes when** a freeze pins only declared outputs, or the argument for pinning
+  intermediates is written at the freeze.
+
+- **A.138 · `12-grader-unchanged` compares grader IDENTITY, not SITE, and cannot see a
+  module-registered grader's body.** *(Lane F; not re-run here.)* A module-registered grader's
+  "digest" is the digest of its ref string (`cli.ts:2240`). §A.29's certification closes that blind
+  spot through `liveBodies`; check 12 does not. **Closes when** check 12 compares the site the freeze
+  records and refuses a host-code grader, or says at the check why it need not.
+
+- **A.139 · A grader's retry changes its `now`, and certification does not check the attempt.**
+  *(Lane F; low — no candidate route to force a retry was found; not re-run here.)* `leaseAt(taskId,
+  attempt)`. **Closes when** certification requires the grader's certifying attempt to be its first,
+  or the argument is written.
+
+- **A.140 · A static join where one member FEEDS another never releases, and the run reports
+  `succeeded`.** *(HIGH — fail-open. Lane K's review; pre-existing on base at every parallelism; the
+  oracle "exempted it on its own row" and no row existed; re-run by driving.)* File:
+  `packages/core/src/run/engine.ts`, `#joinArrivals`: `continuesInBranch` drops a member whose `take`
+  reaches another member from `terminal`, while `expected` (the sibling count, with no fan-out plan)
+  still counts it, so `terminal < expected` forever and nothing is live to wait on. Driven for this
+  settlement on `packages/core/dist/bin.js` built at `d5e4f32a` — `start→a→b`, `a` and `b` each
+  `-join→ J`, `J → done`:
+  ```
+  $ loom compile graphs/memberchain.json    → ok (default-deadline notes only)
+  $ loom run graphs/memberchain.json --input '{"seed":"x"}'
+  exit=0  "status": "succeeded"   "log":["start","a","b"]         ← J and done never ran
+  $ loom trace <runId> | /usr/bin/grep -aE 'loom.task (J|done) '  → (nothing)
+  ```
+  Also `start→m1→m2`, `start→x`, `J{m1,m2,x}`. Common in random graphs: the oracle's
+  `I4memberChain` held 6,208 of 22,856 runs at the tip (6,352 on base). It is also why
+  `#releaseSettledBarriers`' failing-policy hold cannot be made total. **Closes when** such a join
+  releases (the member chain counted as ONE arrival, in one unit on both sides) or the shape is
+  refused at compile — with the driven graph above pinned either way.
+
+- **A.141 · A static join inside a `loop` keys every pass as `J@…#0`, so pass ≥ 1 never releases and
+  the run reports `succeeded`.** *(Lane K's review; pre-existing; not re-run here.)* File:
+  `packages/core/src/run/engine.ts`, `#releaseSettledBarriers` (`makeTaskId(node.id, parent, 0)`).
+  Fail-open, the same outcome as §A.140. **Closes when** a barrier inside a loop is keyed by its
+  iteration and releases on every pass, or the shape is refused at compile, pinned.
+
+- **A.142 · Two rewind/fan-out strands near a join.** *(Lane K's fifth reviewer's probes;
+  pre-existing; not re-run here.)* (a) Rewinding to a `seq` in the MIDDLE of a transaction drops the
+  downstream work. (b) A failing NON-member inside a fan-out body does not stop the join, so `done`
+  runs before the run fails. **Closes when** each is pinned as fixed, or argued at
+  `#releaseSettledBarriers`/`rewind`.
+
+- **A.143 · `#failingOutside`'s side effects depend on the parallelism.** *(Lane K; fail-closed; the
+  table is in `#failingOutside`'s docstring; not re-run here.)* `start→x(throws)` beside
+  `start→a,b -join→ J → deploy`: `deploy` runs at par 1 and not at par 4 (base deployed at both).
+  Nothing runs that should not, but WHAT runs before the failure depends on width. A
+  width-independent policy means FAIL-FAST — a separate decision, flagged to the maintainer.
+  **Closes when** that decision is taken and pinned, or the width-dependence is accepted in writing.
+
+- **A.144 · Test comments still name `#maybeFireJoin`, which §A.101 deleted.** *(Lane K; re-run.)*
+  The six `src/` sites were rewritten by this settlement (`26eab31c`, comment-only; `graph/spec.ts`
+  among them, a kernel file). The rest, in `packages/core/test/` —
+  `/usr/bin/grep -arln 'maybeFireJoin' packages/core/test` → 9 files, among them `join-depth`,
+  `join-seq-entrance`, `join-quorum-k-is-a-floor`, `join-all-branches-fail`,
+  `join-evidence-and-work` and `branch-local-channel`; `rearrival-runs-once.test.ts` names it as
+  history, correctly. **Closes when** each test comment describing the CURRENT mechanism names
+  `#releaseSettledBarriers`/`#joinArrivals`, and the ones describing history say so.
+
+- **A.145 · §A.94's and §A.95's single-arrival and tree compile rules are CONSERVATIVE since
+  §A.101.** *(Lane K; not re-run here.)* Their soundness leaned on a Task possibly running twice; the
+  five rewritten tests in `error-projection-multiplicity`/`outcome-exclusive-writers` show those
+  shapes now run once and are still refused at compile. Refusing is allowed. **Closes when** the
+  rules are relaxed with the runs-once pins kept green, or the conservatism is argued at the rules.
 
 ---
 
@@ -4319,7 +4621,19 @@ Each traces to a decision in `DESIGN.md`.
   a shared `tempRoots`/`after` pair per file, following the try/finally-per-`mkdtempSync` idiom
   already used elsewhere in `test/journal/store.test.ts`, rather than one `t.after` per test.
 
-- **H.21 · `loom --help 1` and `loom --help=yes` exit 0, where `loom --version 1` refuses.** *(Opened
+- ~~**H.21 · `loom --help 1` and `loom --help=yes` exit 0, where `loom --version 1` refuses.**~~
+  **CLOSED 2026-09-29 at `2bfd2bfe`, `6200eb2f` (Lane P, merged `be8e3ce9`).** `--help`
+  refuses a value as `--version` does, and `loom run g.json --help 1` now refuses instead of running;
+  `--help <known verb>` still prints the usage, exit 0 — the WHOLE usage, byte-identical to `loom
+  --help`, not the verb's own (base behaviour kept: the orchestrator's decision). N7 holds. Re-run on
+  `packages/core/dist/bin.js` built at `d5e4f32a`, an empty directory:
+  ```
+  loom --help 1      exit=1  E_CONFIG_INVALID: --help takes no value (got "1") — run `loom --help` on its own.
+  loom --help=yes    exit=1  E_CONFIG_INVALID: --help takes no value (got "yes") — run `loom --help` on its own.
+  loom --help run    exit=0  loom — graph-native multi-agent orchestration   (299 lines, `cmp` equal to `loom --help`)
+  loom --version 1   exit=1  E_CONFIG_INVALID: --version takes no value (got "1") — run `loom --version` on its own.
+  ```
+  Pin: `node --test packages/core/test/cli/version.test.ts` → 14 pass. The row as it stood follows. *(Opened
   2026-09-24 by the settlement, from the install-surface lane's review; re-run.)* On
   `packages/core/dist/bin.js` at `7f576a47`:
   ```
@@ -4330,13 +4644,22 @@ Each traces to a decision in `DESIGN.md`.
   §H.19's class, one door over. **Closes when** `--help` gets `--version`'s value refusal, pinned in
   `test/cli/version.test.ts`.
 
-- **H.22 · `pack.mjs`'s `runPack → archiveHeadInto` call site is unpinned end to end.** *(Opened
+- ~~**H.22 · `pack.mjs`'s `runPack → archiveHeadInto` call site is unpinned end to end.**~~
+  **CLOSED 2026-09-29 at `3ee44679` (Lane P, merged `be8e3ce9`).** `runPack(argv, root)` is
+  exported and pinned end to end over a temp git repository holding a dirty and an untracked file;
+  mutants that pack a working-tree copy go red. Pin: `node --test
+  packages/core/test/scripts-pack.test.ts` → 6 pass. Fixed beside it with no row (`6200eb2f`):
+  `pack.mjs` run through a symlinked path printed nothing and exited 0 — `isMain` now compares real
+  paths. Residue: §H.27. The row as it stood follows. *(Opened
   2026-09-24 by the settlement, from the install-surface lane's review; not re-run here.)*
   `test/scripts-pack.test.ts` tests the pure functions; a mutant that packs a WORKING-TREE copy
   instead stays green, and its success line then lies about what shipped. **Closes when** a test
   packs a checkout holding an uncommitted file through `runPack` and asserts the tarball lacks it.
 
-- **H.23 · A repository nested inside another gives `pack.mjs` a misleading refusal.** *(Opened
+- ~~**H.23 · A repository nested inside another gives `pack.mjs` a misleading refusal.**~~
+  **CLOSED 2026-09-29 at `3ee44679` (Lane P).** `runPack` refuses when `git rev-parse
+  --show-toplevel` is not `root`, naming the repository it resolved; worktrees and `/tmp`-symlinked
+  roots still pack (the reviewer's check). Pin: `scripts-pack.test.ts` → 6 pass. The row as it stood follows. *(Opened
   2026-09-24 by the settlement, from the lane's review, "N6"; not re-run here.)* It fails CLOSED, so
   nothing wrong ships; the reason printed names the wrong cause. **Closes when** the message names
   the repository it resolved.
@@ -4352,7 +4675,17 @@ Each traces to a decision in `DESIGN.md`.
   `module: node16` or `moduleResolution: bundler` is not measured or described. **Closes when** both
   are typechecked against the tarball and the README states the result.
 
-- **H.26 · `loom -h` and `loom -v` exit 2, "unknown command".** *(Opened 2026-09-24 by the
+- ~~**H.26 · `loom -h` and `loom -v` exit 2, "unknown command".**~~
+  **CLOSED 2026-09-29 at `2bfd2bfe` (Lane P).** `-h`/`-v` alias `--help`/`--version` in the
+  verb slot only (`loom compile -v` still hands `-v` to the verb); `-h 1`/`-v 1` refuse like the long
+  forms. Re-run on `packages/core/dist/bin.js` built at `d5e4f32a`:
+  ```
+  loom -h     exit=0  loom — graph-native multi-agent orchestration
+  loom -v     exit=0  loom 0.1.0
+  loom -h 1   exit=1  E_CONFIG_INVALID: --help takes no value (got "1") — run `loom --help` on its own.
+  loom -v 1   exit=1  E_CONFIG_INVALID: --version takes no value (got "1") — run `loom --version` on its own.
+  ```
+  Pin: `version.test.ts` → 14 pass. The row as it stood follows. *(Opened 2026-09-24 by the
   settlement; pre-existing, the same on base; re-run.)*
   ```
   loom -h   exit=2  unknown command "-h"
@@ -4361,9 +4694,14 @@ Each traces to a decision in `DESIGN.md`.
   Every other unknown flag with no verb exits 1 (§H.19's door); these reach the verb parser instead.
   **Closes when** they are aliases of `--help`/`--version`, or refused like any unknown flag, exit 1.
 
+- **H.27 · `scripts/pack.d.mts` does not declare `runPack`.** *(Opened 2026-09-29 by the settlement,
+  from Lane P; re-run by reading.)* The file declares `classifyShippedSource`, `namesASourceMap` and
+  `archiveHeadInto`; `packages/core/test/scripts-pack.test.ts:30–31` casts `packModule` to reach the
+  fourth. **Closes when** `pack.d.mts` declares `runPack(argv, root?)` and the cast is deleted.
+
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-24 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-29 — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -4501,6 +4839,21 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.88 | `7222b9ea` | `take: null` refused; `STILL_ACCEPTED` deleted |
 | A.77 | `1e37ca87` | static unfanned quorum `k` above the distinct members refused (Q11) |
 | A.86 | `51dd4548` | closed by argument at `rule002Terminals` (Q12) |
+| A.105 | `f2a732b4` | `fs.glob`/`fs.grep` return the bare listing; `triage-plan.js` reads `"scan:error"` and refuses a truncated or absent projection. Residue → §A.131 |
+| A.127 | `43150c24` | `grant-access` ships `history: replace`; `residue-error-arm` deleted — no example now uses a third reducer |
+| A.114 | `d33d7ca4` | `fs.write` refuses a non-regular leaf before it can block, `E_FS_UNREADABLE`. Residue → §A.129, §A.130 |
+| H.21 | `2bfd2bfe`, `6200eb2f` | `--help` refuses a value; `--help <verb>` still prints the whole usage |
+| H.26 | `2bfd2bfe` | `-h`/`-v` alias the long forms in the verb slot |
+| A.125 | `2bfd2bfe`, `6200eb2f` | one sanitiser, bidi and U+061C stripped, code-point cap, every file-sourced string |
+| A.126 | `2bfd2bfe`, `6200eb2f` | `details.searched` restored; `exam attest` resolves first; the `loom score` half a non-defect. Residue → §A.132 |
+| H.22 | `3ee44679` | `runPack` pinned end to end over a dirty checkout. Residue → §H.27 |
+| H.23 | `3ee44679` | a nested repository refused by name |
+| A.122 | `b0e6a380` | `requiredMapping` above every `continue`: a subgraph's mapping shape refused whatever the child resolves to. Residue → §A.135, §A.136 |
+| A.102 | `6f7d2c8a`, `8d13dadf`, `a79591d5`, `b10bdefd` | replay binds every adopted successor (`graph.bound`); `loom replay` and `promote --suite` pass the workspace resolver. Residue → §A.133, §A.134 |
+| A.29 | `36f6d065` … `0fd272aa`, seam `be7aef7c` | item 24, by the fold (Q6): a golden case is certified by what its frozen graders were SERVED (`run/served.ts`). Residue → §A.137–§A.139 |
+| A.128 | `36f6d065`, `0fd272aa` | "A.NEW-2": a baseline that cannot reproduce its own recording no longer lowers the bar |
+| A.111 | `be7aef7c`, `6b827418` | by argument (the maintainer): no journal compatibility before 0.1.0, written above `compare` |
+| A.101 | `04e3f12c` … `5486458f` | a Task runs once; one barrier asker between waves on the post-commit projection; `#maybeFireJoin` deleted. Residue → §A.140–§A.145 |
 | — | — | — |
 | §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. Kept as its own line because the row closed in TWO waves and the shas differ; the second half is the `A.55` row above |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
