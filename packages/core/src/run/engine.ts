@@ -12110,11 +12110,26 @@ export class Engine {
       // the back-edge. Resetting it to 0 on a forward edge made the second pass
       // re-target the FIRST pass's TaskId — which the fold marks ready again, forever.
       const iteration = e.kind === "loop" ? w.task.iteration + 1 : w.task.iteration;
+      const taskId = makeTaskId(e.to, w.task.branch, iteration);
+
+      // AN ARRIVAL AT A TASK THAT ALREADY EXISTS IS NOT WRITTEN — §A.101. One Task per
+      // `(node, branch, iteration)`: the first arrival readies it and a later one changes nothing,
+      // which is what the fold already did when two arrivals coincided. The fold now refuses the
+      // row on a TERMINAL Task (see its `task.ready` arm), but it cannot refuse one on a `leased`
+      // Task, because `rewind` re-arms a `leased` Task with exactly this row — so written, an
+      // arrival at a Task still in flight is indistinguishable from a re-arm and puts it back to
+      // `ready` behind its worker. `p` is re-projected inside `#commit`'s serialized append, so
+      // it holds every sibling commit this one follows. `pending` is the one existing state that
+      // is not yet runnable — a record some other row created first — and it still gets its row.
+      //
+      // The arrival is not lost: this commit's own `take` names `e.id`.
+      const held = p.tasks[taskId];
+      if (held !== undefined && held.state !== "pending") continue;
       events.push({
         type: "task.ready",
         payload: { nodeId: e.to, branchPath: encodeBranch(w.task.branch), edgesIn: [e.id] },
         actor: SYSTEM_ACTOR("scheduler"),
-        taskId: makeTaskId(e.to, w.task.branch, iteration),
+        taskId,
       });
     }
 

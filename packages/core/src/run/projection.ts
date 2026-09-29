@@ -1163,6 +1163,31 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "task.ready")) {
     const branch = decodeBranch(e.payload.branchPath);
     const id = e.taskId ?? makeTaskId(e.payload.nodeId, branch, 0);
+    // A FINISHED TASK IS NOT RE-READIED — §A.101. A Task is one per `(node, branch, iteration)`,
+    // and `#activate` writes one of these per edge a commit takes, so a node two paths reach gets
+    // one per path. When the arrivals coincide the second lands on a Task still `ready` and moves
+    // nothing. When the second path is longer it landed on a Task that had already COMMITTED, and
+    // this arm put it back to `ready` under the same id: the node ran twice, both writes applied,
+    // a failure routed down its `error` arm then ran the success arm too, and a reader behind the
+    // error arm read `"X:error"` as `{ok: true}`. Every such run reported `succeeded`.
+    //
+    // NO WRITER RE-READIES A TERMINAL TASK ON PURPOSE. Of the engine's seven `task.ready` sites,
+    // `rewind` re-arms only `leased` Tasks and `retry` only the Task it just moved to `retrying`;
+    // the rest mint Tasks. So the only row this refuses is an ARRIVAL, and the arrival is not
+    // lost — the sender's `task.committed.take` names the edge. A `loop` edge mints
+    // `iteration + 1`, a different Task, so a back-edge still re-runs its target.
+    //
+    // HERE, where the state lives, so every journal folds to it — including one an older binary
+    // wrote with the late row in it, which a restart would otherwise re-run. Such a journal's
+    // FINAL fold is unchanged (the re-run's own lease, commit and reduce rows still fold); what
+    // changes is that a process attaching between the late row and the re-lease runs nothing.
+    // THE LIVE STATES ARE NOT REFUSED HERE. `leased → ready` is `rewind`'s re-arm and `retrying →
+    // ready` is `retry`'s, and this arm cannot tell either row from an arrival. `awaiting_gate`
+    // has no writer that re-readies it, and no arrival was measured reaching it — the run suspends
+    // — so it is left as it was rather than refused on a guess. The engine's half covers all
+    // three: `#activate` writes no arrival at a Task the projection already holds.
+    const held = p.tasks[id]?.state;
+    if (held === "succeeded" || held === "failed" || held === "skipped" || held === "cancelled") return;
     upsertTask(p, id, { state: "ready", edgesIn: e.payload.edgesIn as readonly EdgeId[] });
     const binding = e.payload.binding;
     if (binding !== undefined) {
