@@ -1,50 +1,39 @@
 /**
- * §A.29 / DESIGN item 24, REPRODUCED: a frozen golden case pins the whole work channel verbatim, so
- * a candidate the graph's OWN verifier certifies is refused by `1-must-pass` and reported as a
- * 33.3pp regression.
+ * §A.29 / DESIGN item 24, CLOSED: a candidate the graph's OWN verifier certifies on every case is
+ * PROMOTED, and a candidate that really drops items is still refused at Δ -33.3pp.
  *
- * WHY THIS FILE EXISTS. Item 24 said the behaviour "is NOT currently reproduced by a command", and
- * §A.29's only repro was a grep the row itself disowns. Producing one was the item's own first task.
- * This is it, driven end to end through the shipped verbs on a real SQLite workspace — `loom run`
- * ×30, `loom exam attest`, `loom score` ×30, `loom suite freeze`, `loom promote --suite` — so the
- * refusal below is `freezeSuite` + `runEvalSuite` + `gateCandidate` deciding, not a mock of them.
+ * WHY THIS FILE EXISTS. It was the item's first task: a GREEN-IS-WRONG pin (`0558c2a5`) in which a
+ * frozen golden case pinned the whole work channel byte for byte, so the candidate below — certified
+ * 30/30 by its own `check` — was refused `1-must-pass` + `2-non-inferior` at "66.7% vs baseline
+ * 100.0% (Δ -33.3pp)", and the CONTROL that genuinely drops items got the IDENTICAL verdict. The gate
+ * could not tell them apart. The expectations are now swapped, as the pin asked.
  *
- * THE MECHANISM, as the code has it. `freezeSuite` (`cli.ts`) gives every GOLDEN case
- * `expect.channels` = every recorded channel the grader did not write and the graph did not take as
- * input — here `picked`, the work itself — and `runCase` (`evolution/gate.ts`) compares each by
- * `sameContent`. So the pin is BYTE-level on the canonical form: any candidate that produces a
- * different-but-correct `picked` fails every golden case, and golden cases are exactly the
- * `mustPass` ones. The freeze's own docstring names this as the price of pinning ("a candidate that
- * fixes one fails a must-pass case"); what it does not say is that the price is charged to a
- * candidate the graph's own verifier certifies on EVERY case.
+ * WHAT CHANGED, as the code has it. `loom suite freeze` writes the cohort graph's graders — with the
+ * identity `12-grader-unchanged` compares — onto every golden case that pins a channel
+ * (`EvalCase.expect.graders`). `runCase` (`evolution/gate.ts`) still compares each pinned channel by
+ * `sameContent`, and a channel that DIFFERS passes only when `certification` holds: the named grader
+ * is unchanged, ran as one Task on the root branch whose own commit says `pass: true`, and
+ * `run/served.ts` — the kernel fold of the replay's shadow journal through that Task's lease — says it
+ * was SERVED the value the run ended with and the RECORDED inputs. Not the final value alone, and never
+ * static ancestry: the four games that defeated the reverted waiver (`aabdc63`) are re-driven in
+ * `a29-served-certificate.test.ts` and refused there.
  *
- * THE WORKFLOW. `pick` should keep every item; its verifier `check` asserts that `picked` is the
- * same MULTISET as `items` — order is not part of the contract, and the verifier says so. The
- * baseline is wrong on even-length inputs (it drops the last item), which is what gives the corpus
- * both halves: the 10 odd-length runs of 30 are golden, the 20 even-length runs are not (freeze
- * refuses an all-golden or all-non-golden selection). The candidate keeps every item and emits them
- * newest-first. Its own verifier passes it on 30 of 30 replayed cases — where the baseline's passes
- * 10 of 30 — and `promote --suite` refuses it:
+ * Driven end to end through the shipped verbs on a real SQLite workspace — `loom run` ×30, `loom exam
+ * attest`, `loom score` ×30, `loom suite freeze`, `loom promote --suite` — so the promotion below is
+ * `freezeSuite` + `runEvalSuite` + `gateCandidate` deciding, not a mock of them.
  *
- *     ✗ 1-must-pass   must-pass failures: <the 10 golden cases>
- *     ✗ 2-non-inferior pass rate 66.7% vs baseline 100.0% (Δ -33.3pp)
+ * THE WORKFLOW. `pick` should keep every item; its verifier `check` asserts that `picked` is the same
+ * MULTISET as `items` — order is not part of the contract, and the verifier says so. The baseline is
+ * wrong on even-length inputs (it drops the last item), which gives the corpus both halves: the 10
+ * odd-length runs of 30 are golden, the 20 even-length runs are not. The candidate keeps every item
+ * and emits them newest-first; its own verifier passes it on 30 of 30 replayed cases, where the
+ * baseline's passes 10 of 30.
  *
- * The 33.3pp is 10/30: the golden share of the cohort, charged in full, because the non-golden
- * cases pin nothing (so the candidate's fix there earns nothing) and the golden ones pin order.
- *
- * THIS TEST IS GREEN AND THE BEHAVIOUR IT PINS IS WRONG, which is deliberate: §G.5's shape
- * (`test/run/graph-binding.test.ts`), because the fix is not in reach of a test file. CLOSING IT is
- * item 24's second half and is a DECISION first (handoff 2026-09-23 §7, Q6): either a fold that can
- * answer "what did channel C hold when task T read it" (keyed on `task.leased` seq), so the pin can
- * be replaced by a statement about what the grader saw — or property 3's claim re-scoped to what the
- * exam establishes, with `CLAUDE.md` §3's five assumptions rewritten to match. WHEN THAT LANDS THIS
- * TEST GOES RED: `promote` flips to true, or the failing set loses `1-must-pass`, or the Δ moves.
- * Swap the expectations then and delete these paragraphs. The CONTROL at the bottom — a candidate
- * that genuinely drops items is refused — must stay green through that change.
- *
- * WHAT IS NOT CLAIMED. That the operator's attested exam also certifies the candidate is true of the
- * exam body below by reading (it is order-insensitive too) and was NOT driven: judging a candidate
- * against the exam is `promote --against-cohort`, a live door this file does not open.
+ * WHAT THIS DOES NOT CLAIM. That the frozen suite now shows the candidate BETTER: the non-golden cases
+ * still pin nothing, so the candidate ties the baseline at 30/30 and promotes on non-inferiority. The
+ * claim that it is better is `promote --against-cohort`'s, live, and is not driven here. And the
+ * certificate is exactly as strong as `check`: a verifier that asserted only a length would certify
+ * any value of that length — its strength is the operator's, who froze it.
  *
  * Offline and deterministic: `function` and `evaluator{assertion}` nodes only, no model adapter, no
  * clock ratio. Every number asserted is a count.
@@ -217,7 +206,10 @@ async function promote(c: Corpus, graph: string): Promise<{ code: number; out: s
 }
 
 /** The graph's own verifier, as the replay of each frozen case against `graph` recorded it. */
-async function verifierVerdicts(c: Corpus, graph: string): Promise<{ id: string; mustPass: boolean; pass: unknown; caseReasons: readonly string[] }[]> {
+async function verifierVerdicts(
+  c: Corpus,
+  graph: string,
+): Promise<{ id: string; mustPass: boolean; pass: unknown; caseReasons: readonly string[]; certified: readonly { channel: string; grader: string }[] }[]> {
   const ws = openWorkspace(parseArgs(["gates", "--workspace", c.dir]));
   try {
     const compiled = compile({
@@ -240,6 +232,7 @@ async function verifierVerdicts(c: Corpus, graph: string): Promise<{ id: string;
       mustPass: k.mustPass,
       pass: (k.replay?.replayed.channels["verdict"] as { pass?: unknown } | undefined)?.pass,
       caseReasons: k.reasons,
+      certified: (k.certified ?? []).map((x) => ({ channel: x.channel, grader: x.grader })),
     }));
   } finally {
     ws.close();
@@ -250,17 +243,27 @@ async function verifierVerdicts(c: Corpus, graph: string): Promise<{ id: string;
 // the pin
 // ---------------------------------------------------------------------------
 
-test("§A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS REFUSED BY 1-must-pass AS A 33.3pp REGRESSION", async () => {
+test("§A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS PROMOTED — the golden pin is waived on the frozen grader's word", async () => {
   const c = await corpus();
   const suite = JSON.parse(readFileSync(c.suiteFile, "utf8")) as EvalSuite;
 
-  // THE EXAM AS FROZEN: every judged run is a case, the ten odd-length ones golden, and each
-  // golden case pins the work channel — `picked`, verbatim — and nothing else.
+  // THE EXAM AS FROZEN: every judged run is a case, the ten odd-length ones golden, and each golden
+  // case pins the work channel — `picked`, verbatim — and names the grader that may excuse it, with
+  // the identity the freeze resolved. The non-golden cases pin nothing and name no grader.
   assert.equal(suite.cases.length, 30);
   const golden = suite.cases.filter((k) => k.mustPass);
   assert.equal(golden.length, 10, "the ten runs the baseline got right are the goldens");
-  for (const k of golden) assert.deepEqual(Object.keys(k.expect.channels ?? {}), ["picked"], k.id);
-  for (const k of suite.cases.filter((x) => !x.mustPass)) assert.equal(k.expect.channels, undefined, k.id);
+  for (const k of golden) {
+    assert.deepEqual(Object.keys(k.expect.channels ?? {}), ["picked"], k.id);
+    assert.deepEqual(Object.keys(k.expect.graders ?? {}), ["node:check"], k.id);
+    const g = k.expect.graders!["node:check"]!;
+    assert.deepEqual([g.kind, g.ref, g.reads, g.threshold], ["assertion", "function/check@stable", ["items", "picked"], 0.5], k.id);
+    assert.match(String(g.digest), /^sha256:[0-9a-f]{64}$/, `${k.id}: the grader's body is bound by digest`);
+  }
+  for (const k of suite.cases.filter((x) => !x.mustPass)) {
+    assert.equal(k.expect.channels, undefined, k.id);
+    assert.equal(k.expect.graders, undefined, k.id);
+  }
 
   // THE GRAPH'S OWN VERIFIER CERTIFIES THE CANDIDATE ON ALL THIRTY CASES — and the baseline on ten.
   const cand = await verifierVerdicts(c, "reversed.json");
@@ -268,8 +271,6 @@ test("§A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS REFUSED 
   assert.deepEqual(cand.filter((k) => k.pass !== true).map((k) => k.id), [], "check wrote verdict.pass === true on every replayed case");
   const base = await verifierVerdicts(c, join("graphs", "keep.json"));
   assert.equal(base.length, 30);
-  // Both halves stated POSITIVELY: `true` on the goldens and a real `false` elsewhere, so a missing
-  // or non-boolean verdict cannot pass as "not certified".
   assert.deepEqual(
     base.filter((k) => k.pass === true).map((k) => k.id).sort(),
     golden.map((k) => k.id).sort(),
@@ -281,32 +282,36 @@ test("§A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS REFUSED 
     "…and FAILS it, verdict.pass === false, on the other twenty",
   );
 
-  // …AND THE ONLY THING THE CANDIDATE FAILED IS THE VERBATIM PIN.
-  const failed = cand.filter((k) => k.caseReasons.length > 0);
-  assert.deepEqual(failed.map((k) => k.id).sort(), golden.map((k) => k.id).sort(), "exactly the golden cases fail");
-  for (const k of failed) assert.deepEqual(k.caseReasons, ['channel "picked" differs'], k.id);
+  // …AND NO CASE FAILS: every golden's `picked` still DIFFERS from the recording, and each is
+  // certified by `check` — named, so a pass that rests on a grader's word is visible as one.
+  assert.deepEqual(cand.filter((k) => k.caseReasons.length > 0).map((k) => [k.id, k.caseReasons]), [], "no case fails");
+  assert.deepEqual(
+    cand.filter((k) => k.certified.length > 0).map((k) => k.id).sort(),
+    golden.map((k) => k.id).sort(),
+    "exactly the goldens were certified rather than byte-matched",
+  );
+  for (const k of cand.filter((x) => x.mustPass)) assert.deepEqual(k.certified, [{ channel: "picked", grader: "node:check" }], k.id);
+  // The baseline byte-matches its own goldens and needs no certificate.
+  assert.deepEqual(base.filter((k) => k.certified.length > 0).map((k) => k.id), []);
 
   // THE DECISION, through the shipped door.
   const r = await promote(c, "reversed.json");
-  assert.equal(r.code, 1);
-  assert.equal(r.decision.promote, false);
-  assert.deepEqual(
-    r.decision.checks.filter((x) => !x.pass).map((x) => x.id).sort(),
-    ["1-must-pass", "2-non-inferior"],
-    "refused on the must-pass floor and the pass rate — and on nothing else",
-  );
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.decision.promote, true);
+  assert.deepEqual(r.decision.checks.filter((x) => !x.pass).map((x) => x.id), [], "no check fails");
   assert.deepEqual([r.decision.baseline.passed, r.decision.baseline.total], [30, 30]);
-  assert.deepEqual([r.decision.candidate.passed, r.decision.candidate.total], [20, 30]);
-  const ni = r.decision.checks.find((x) => x.id === "2-non-inferior")!;
-  assert.equal(ni.detail, "pass rate 66.7% vs baseline 100.0% (Δ -33.3pp)", "REPORTED AS A 33.3pp REGRESSION");
-  const mp = r.decision.checks.find((x) => x.id === "1-must-pass")!;
-  for (const k of golden) assert.ok(mp.detail.includes(k.id), `${k.id} named as a must-pass failure`);
-  // The grader is untouched, so this is not the rigged-grader refusal wearing another name.
+  assert.deepEqual([r.decision.candidate.passed, r.decision.candidate.total], [30, 30]);
+  assert.equal(
+    r.decision.checks.find((x) => x.id === "2-non-inferior")!.detail,
+    "pass rate 100.0% vs baseline 100.0% (Δ 0.0pp)",
+    "a tie, not an improvement — the frozen suite pins nothing on the non-goldens",
+  );
+  // The grader is untouched, which is also what the certificate required.
   assert.equal(r.decision.checks.find((x) => x.id === "12-grader-unchanged")!.pass, true);
-  assert.match(r.out, /case \S+ failed — channel "picked" differs/);
+  assert.doesNotMatch(r.out, /case \S+ failed/);
 });
 
-test("CONTROL · a candidate that really drops items is refused on the same two checks, and its own verifier says so", async () => {
+test("CONTROL · a candidate that really drops items is still refused at Δ -33.3pp, and the reason says the frozen grader did not pass it", async () => {
   const c = await corpus();
   const verdicts = await verifierVerdicts(c, "dropper.json");
   assert.equal(verdicts.length, 30);
@@ -315,12 +320,19 @@ test("CONTROL · a candidate that really drops items is refused on the same two 
     Array.from({ length: 30 }, () => false),
     "check fails the dropper — verdict.pass === false — on every case",
   );
+  const golden = verdicts.filter((k) => k.mustPass);
+  assert.equal(golden.length, 10);
+  for (const k of golden) {
+    assert.deepEqual(k.caseReasons, ['channel "picked" differs, and no frozen grader certifies it — node:check did not pass it'], k.id);
+    assert.deepEqual(k.certified, [], k.id);
+  }
 
   const r = await promote(c, "dropper.json");
+  assert.equal(r.code, 1);
   assert.equal(r.decision.promote, false);
   assert.deepEqual(r.decision.checks.filter((x) => !x.pass).map((x) => x.id).sort(), ["1-must-pass", "2-non-inferior"]);
-  // THE SAME NUMBER. The frozen suite cannot tell the dropper from the reversed candidate: both are
-  // 20/30 and Δ -33.3pp, one certified by the graph's verifier on 30 cases and one on 0.
+  // THE SAME NUMBER AS BEFORE THE CHANGE — the refusal that was right stays exactly as it was, and
+  // the reversed candidate above no longer shares it.
   assert.deepEqual([r.decision.candidate.passed, r.decision.candidate.total], [20, 30]);
   assert.equal(r.decision.checks.find((x) => x.id === "2-non-inferior")!.detail, "pass rate 66.7% vs baseline 100.0% (Δ -33.3pp)");
 });

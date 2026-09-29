@@ -57,6 +57,7 @@ import { OpenAIAdapter } from "./providers/openai.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, type HttpOptions } from "./providers/http.ts";
 import { resolvePrice } from "./providers/usage.ts";
 import { replayRun } from "./run/replay.ts";
+import { evaluatorIdentities, graderSite } from "./run/served.ts";
 import {
   BearerTokenIdentity,
   ControlPlane,
@@ -11676,6 +11677,19 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
 
   const evaluatorNodes = new Set(baseline.spec.nodes.filter((n) => n.type === "evaluator").map((n) => n.id));
   const inputChannels = new Set<string>(baseline.spec.inputs);
+  // THE GRADERS THIS FREEZE NAMES, written onto every golden case that pins a channel (§A.29).
+  // A pinned channel that DIFFERS may then still pass — but only when one of THESE graders, held to
+  // this identity, certifies the candidate's value under the conditions `evolution/gate.ts`
+  // `certification` states. The operator's freeze names them, never the candidate: the identity is
+  // the cohort graph's, resolved here, and a candidate whose grader is not byte-for-byte this one
+  // keeps the byte pin. `12-grader-unchanged` refuses the IDENTITY half of that besides; it does not
+  // compare `site`, so a candidate that only re-wires the grader keeps the pin and is not refused.
+  const graders = Object.fromEntries(
+    Object.entries(evaluatorIdentities(baseline)).map(([scope, identity]) => {
+      const site = graderSite(baseline, scope.slice("node:".length));
+      return [scope, { ...identity, ...(site === undefined ? {} : { site }) }];
+    }),
+  );
 
   interface Selectable {
     readonly runId: RunId;
@@ -11767,7 +11781,9 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
         // UNCONDITIONAL now. Every case in a frozen suite carries the invariant, so a reader
         // does not have to check which ones do.
         noIrreversibleWithoutGate: true,
-        ...(sc.golden && Object.keys(pinned).length > 0 ? { channels: pinned } : {}),
+        ...(sc.golden && Object.keys(pinned).length > 0
+          ? { channels: pinned, ...(Object.keys(graders).length > 0 ? { graders } : {}) }
+          : {}),
       },
     });
   }

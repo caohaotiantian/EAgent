@@ -22,11 +22,15 @@
 
 import { sameContent } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
-import type { RunId } from "../ids.ts";
+import { ROOT_BRANCH, type RunId } from "../ids.ts";
+import { isEvent } from "../journal/events.ts";
+import { payloadHandle } from "../journal/payloads.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { Budget, RunGraph } from "../graph/spec.ts";
 import type { EngineOptions } from "../run/engine.ts";
 import { replayRun, type ReplayReport } from "../run/replay.ts";
+import { isLowConfidence } from "../run/escalation.ts";
+import { contentDigest, evaluatorIdentities, graderSite, servedTo, snapshotAt, type ChannelSnapshot } from "../run/served.ts";
 
 export interface EvalCase {
   readonly id: string;
@@ -60,6 +64,26 @@ export interface EvalCase {
      * assert, and it is the only thing this flag asserts.
      */
     readonly identicalToRecording?: boolean;
+    /**
+     * The graders the OPERATOR'S FREEZE named for this case, keyed `node:<id>` with the identity
+     * `12-grader-unchanged` compares — kind, ref, resolved digest, `reads`, `threshold`
+     * (`EvalReport.evaluators`' own entry shape) — plus `site`, a digest of the grader's whole
+     * declaration, every edge leaving it and the spec of every channel it reads (`run/served.ts`
+     * `graderSite`, and why). Written by
+     * `loom suite freeze` on the golden cases that pin channels; absent on every case frozen before
+     * it, which keep the byte pin unchanged. A grader with no `site` certifies nothing.
+     *
+     * WHAT IT BUYS: a pinned channel that DIFFERS may still pass, when these graders certify the
+     * candidate's value — see `certification`, which states the five conditions. §A.29: a candidate
+     * the graph's own verifier certifies 30/30 was refused as a 33.3pp regression, identically to one
+     * that really drops items.
+     *
+     * WHY THE IDENTITY IS IN THE CASE AND NOT ONLY IN CHECK 12. `runEvalSuite` is exported and judges
+     * one graph; a caller that never reaches `gateCandidate` would otherwise let a candidate's own
+     * rewritten grader waive its own pin. And if check 12 is ever relaxed — the strengthened-grader
+     * residue it carries — the waiver must not silently start trusting whatever grader is present.
+     */
+    readonly graders?: Readonly<Record<string, EvalReport["evaluators"][string] & { readonly site?: string }>>;
   };
 }
 
@@ -98,6 +122,22 @@ export interface CaseResult {
   readonly pass: boolean;
   readonly mustPass: boolean;
   readonly reasons: readonly string[];
+  /**
+   * Pinned channels that DIFFERED from the recording and passed because a frozen grader certified
+   * them — `{channel, grader, taskId}` each. On the page because a pass that rests on a grader's
+   * word rather than on bytes is a different claim, and a reader of the report should see which.
+   */
+  readonly certified?: readonly { readonly channel: string; readonly grader: string; readonly taskId: string }[];
+  /**
+   * PRESENT ONLY WHEN THE REPLAY THREW — so `replay` is absent — and the recording could be read:
+   * whether the graph this case replayed IS the one it was recorded with, by SPEC hash
+   * (`run.submitted.graphHash` against the replayed graph's). `2-non-inferior` needs it to tell "the
+   * baseline could not reproduce its own recording" from "the operator chose another baseline
+   * graph" on a case with no report to ask (§A.NEW-2). Refs are not compared here — a thrown replay
+   * leaves no manifest binding — so a moved resource under an unchanged spec reads as the recorded
+   * graph, which is the strict direction for that rule.
+   */
+  readonly recordedGraph?: { readonly recorded: string; readonly replayed: string; readonly match: boolean };
   readonly costUsd: number;
   readonly wallMs: number;
   /**
@@ -239,22 +279,13 @@ export async function runEvalSuite(opts: EvalOptions): Promise<EvalReport> {
   };
 }
 
-/** `EvalReport.evaluators` for one graph — see that field for the key shape. */
-function evaluatorsOf(graph: RunGraph): EvalReport["evaluators"] {
-  const out: Record<string, { kind: "assertion" | "rubric"; ref: string; digest?: string; reads: readonly string[]; threshold?: number }> = {};
-  for (const node of graph.spec.nodes) {
-    if (node.type !== "evaluator" || node.evaluator === undefined) continue;
-    const resolved = graph.resolutionManifest.find((r) => r.ref === node.evaluator?.ref);
-    out[`node:${String(node.id)}`] = {
-      kind: node.evaluator.kind,
-      ref: node.evaluator.ref,
-      ...(resolved === undefined ? {} : { digest: resolved.digest }),
-      reads: [...(node.reads ?? [])].sort(),
-      ...(node.evaluator.threshold === undefined ? {} : { threshold: node.evaluator.threshold }),
-    };
-  }
-  return out;
-}
+/**
+ * `EvalReport.evaluators` for one graph — see that field for the key shape. ONE definition, in
+ * `run/served.ts`, because `loom suite freeze` writes the same projection into a case
+ * (`EvalCase.expect.graders`) and `certification` compares the two: a second copy of "what a
+ * grader's identity is" is how the freeze and the gate would come to disagree.
+ */
+const evaluatorsOf = (graph: RunGraph): EvalReport["evaluators"] => evaluatorIdentities(graph);
 
 /**
  * The three dimensions a `Budget` can state, as the closed set the diff walks.
@@ -326,6 +357,7 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
   try {
     report = await replayRun({ store: opts.store, runId: c.runId, graph: opts.graph, engine: opts.engine });
   } catch (e) {
+    const recordedHash = await submittedGraphHash(opts.store, c.runId);
     return {
       id: c.id,
       pass: false,
@@ -333,12 +365,17 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
       // A candidate that no longer consumes the recorded effects has failed the
       // regression suite; it has not merely errored.
       reasons: [`replay failed: ${(e as Error).message}`],
+      ...(recordedHash === undefined
+        ? {}
+        : { recordedGraph: { recorded: recordedHash, replayed: opts.graph.graphHash, match: recordedHash === opts.graph.graphHash } }),
       costUsd: 0,
       wallMs: 0,
     };
   }
 
   const p = report.replayed;
+  const certified: { channel: string; grader: string; taskId: string }[] = [];
+  let recorded: ChannelSnapshot | undefined;
   if (c.expect.status !== undefined && p.status !== c.expect.status) {
     reasons.push(`status ${p.status}, expected ${c.expect.status}`);
   }
@@ -355,13 +392,22 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
     // CanonicalizationError` out of the whole verb, killing the promotion instead of
     // refusing it. Found by running the live demo, which names six verdict channels and
     // meets runs that produced none of them.
+    // AND IT IS DECIDED BEFORE ANY CERTIFICATE IS CONSULTED. The reverted waiver of `aabdc63`
+    // short-circuited this loop above the never-written guard, and a candidate that produced
+    // NOTHING promoted (game A'). A grader's word can excuse different bytes, never absent ones.
     if (!(channel in p.channels)) {
       reasons.push(`channel "${channel}" was never written by this run`);
       continue;
     }
-    if (!sameContent(p.channels[channel], want)) {
+    if (sameContent(p.channels[channel], want)) continue;
+    if (c.expect.graders === undefined) {
       reasons.push(`channel "${channel}" differs`);
+      continue;
     }
+    recorded ??= await recordedInputs(opts.store, c.runId);
+    const cert = certification(channel, c.expect.graders, report, opts.graph, recorded);
+    if (cert.ok) certified.push(...cert.by.map((b) => ({ channel, ...b })));
+    else reasons.push(`channel "${channel}" differs, and no frozen grader certifies it — ${cert.why}`);
   }
   if (c.expect.maxCostUsd !== undefined && p.usage.costUsd > c.expect.maxCostUsd) {
     reasons.push(`cost $${p.usage.costUsd.toFixed(6)} over $${c.expect.maxCostUsd}`);
@@ -384,10 +430,177 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
     pass: reasons.length === 0,
     mustPass: c.mustPass,
     reasons,
+    ...(certified.length === 0 ? {} : { certified }),
     costUsd: p.usage.costUsd,
     wallMs: p.usage.wallMs,
     replay: report,
   };
+}
+
+/**
+ * Does a frozen grader certify the candidate's value of `channel`? §A.29, and the whole of the
+ * loosening: a pinned channel that DIFFERS from the recording passes only when this says so.
+ *
+ * THE FOUR GAMES THAT DEFEATED THE LAST WAIVER (`aabdc63`) all worked one way: the waiver
+ * reconstructed what the grader SAW from the run's FINAL value and the graph's STATIC ancestry, and
+ * the candidate owns both. This reads neither. It asks `run/served.ts` what the grader's Task was
+ * SERVED — the kernel fold of the shadow journal through that Task's lease, read through the
+ * kernel's own `viewFor` — which is a statement about time the candidate's graph cannot rearrange
+ * after the fact.
+ *
+ * CERTIFIED iff, for EVERY frozen grader that reads `channel` (and there is at least one):
+ *   1. IT IS THE GRADER THE FREEZE NAMED, AND ITS COMMIT IS ITS BODY'S VERDICT. The candidate's
+ *      evaluator at that id has the frozen identity — kind, ref, a resolved digest (required),
+ *      `reads`, `threshold` — and the frozen SITE (`graderSite`: its whole `NodeSpec`, every edge
+ *      leaving it, which is what its `ctx.node` is built from, and the `ChannelSpec` of every channel
+ *      it reads, which with the fold's state is what its view is built from). It ran as exactly one Task,
+ *      at iteration 0 — its `ctx.taskId`, and the seed and clock keyed on it, are the recording's —
+ *      as a realm body the runtime vouched for (absent from `ReplayReport.liveBodies`), so the
+ *      digest bound at freeze is the digest of what ran. No gate
+ *      was raised on it and no hook changed it (a gate decided with `edit` and
+ *      a `preNode` skip both commit `succeeded` with writes no body produced), and the graph did not
+ *      mutate before it committed. Its OWN commit — never the final `verdict` channel, which a later
+ *      node may overwrite — carries at least one verdict object, and every one says `pass === true`
+ *      with no score below the grader's threshold (`isLowConfidence`, the E1 rule).
+ *   2. WHAT WAS GRADED IS WHAT IS KEPT. The value it was served for `channel` is content-equal to the
+ *      value the run ENDED with (game C: a spoiler after the grader, however it is reached).
+ *   3. THE TRUTH IT COMPARED AGAINST IS THE RECORDING'S. Every OTHER channel it reads is one the
+ *      recording was submitted with, and it was served that recorded value (games A and G: rewrite
+ *      the truth, let the grader agree, restore it afterwards).
+ *   4. `channel` WAS WRITTEN AT ALL — decided by `runCase` before this is called (game A').
+ *   5. THE FOLD COULD DECIDE — `served.ts` names the undecidable set: a fan-out Task, and a Task
+ *      that committed more or less than once, was leased after its commit, or has no lease before it.
+ * Anything else keeps the byte pin, and the case's reason says which condition failed.
+ *
+ * NOT CHECKED, and argued rather than forgotten: that the grader is an `assertion`. A `rubric`
+ * grader's verdict is a MODEL call, which replay serves from the recording under a derived key; a
+ * candidate whose `channel` differs changes the request, so `reboundEffects` names it and the case
+ * fails on that reason whatever this returns. A guard nothing can distinguish is not added. Nor is
+ * the commit's `status`: a commit that did not succeed carries no verdict, which condition 1 reads.
+ *
+ * WHAT IT CERTIFIES IS EXACTLY WHAT THE GRADER CHECKS. A grader that asserts only a length
+ * certifies any value of that length; its strength is the operator's, who named it at freeze —
+ * the same division of labour as the attested exam, one level down.
+ *
+ * RESIDUE, named. (a) `12-grader-unchanged` has the module-only blind spot condition 1 closes here
+ * and does NOT close it: it compares the same resolved digest, so a grader whose body a module
+ * registered — digest of its own ref string — reads "unchanged" whatever the module now registers.
+ * A candidate cannot reach that (modules come from argv, the operator's), but an operator who swaps
+ * a module between freeze and promote is not told. (b) `liveBodies` is the runtime's word that a
+ * body is realm-branded, not that it was compiled from THIS digest's content: a module that builds
+ * a realm body from other source (`createFunctionLoader` over its own store) and registers it under
+ * the grader's ref is branded and passes. That is operator-authored code again — `CLAUDE.md` §3's
+ * first assumption — and it is where this certificate stops.
+ */
+function certification(
+  channel: string,
+  graders: NonNullable<EvalCase["expect"]["graders"]>,
+  report: ReplayReport,
+  graph: RunGraph,
+  recorded: ChannelSnapshot,
+): { ok: true; by: { grader: string; taskId: string }[] } | { ok: false; why: string } {
+  const no = (why: string): { ok: false; why: string } => ({ ok: false, why });
+  const specs = graph.spec.channels;
+  const readers = Object.entries(graders).filter(([, g]) => Array.isArray(g.reads) && g.reads.includes(channel));
+  if (readers.length === 0) return no(`no grader the freeze named reads "${channel}"`);
+  const kept = contentDigest(snapshotAt(report.replayed, ROOT_BRANCH, [channel], specs), channel);
+  const present = evaluatorsOf(graph);
+  const by: { grader: string; taskId: string }[] = [];
+  for (const [scope, frozen] of readers) {
+    const nodeId = scope.slice("node:".length);
+    // ── 1: the grader the freeze named, and its commit is its body's verdict ──
+    const now = present[scope];
+    if (now === undefined) return no(`${scope} is not an evaluator in this graph`);
+    if (frozen.digest === undefined) return no(`the freeze named ${scope} with no resolved body digest, so its body is not bound`);
+    const moved = movedEvaluators({ [scope]: frozen }, { [scope]: now });
+    if (moved.length > 0) return no(`${scope} is not the grader the freeze named (${moved.join("; ")})`);
+    const site = graderSite(graph, nodeId);
+    if (frozen.site === undefined || site !== frozen.site) {
+      return no(`${scope}'s declaration, an edge leaving it, or a channel it reads is not the one the freeze named, and its body is handed all three`);
+    }
+    const tasks = Object.values(report.replayed.tasks).filter((t) => String(t.nodeId) === nodeId);
+    if (tasks.length !== 1) return no(`${scope} ran as ${String(tasks.length)} Tasks, so what it graded has more than one answer`);
+    const task = tasks[0]!;
+    // THE ITERATION IS PART OF WHAT THE BODY IS HANDED. `ctx.taskId` carries it, and the recorded
+    // seed and clock are keyed on the TaskId; a candidate that reaches the grader only at iteration
+    // 1 hands it a seed derived from the key instead. Lane F's re-review drove a grader that
+    // spot-checks one seed-chosen item to certify a candidate that dropped another — refused then
+    // only because the recording's unasked-for seed tripped `unexercised`, a guard this one should
+    // not lean on without naming it. So it does not lean on it.
+    if (task.iteration !== 0) {
+      return no(`${scope} ran at iteration ${String(task.iteration)}, so its task id, seed and clock are not the ones the recording served`);
+    }
+    // THE DIGEST MUST BIND THE BODY THAT RAN. The identity above compares the digest the grader's
+    // ref RESOLVED to, which is the digest of a resource's CONTENT — and a body registered by a
+    // module (`--extension-module`) is not that content: `openWorkspace` seeds a module-only ref
+    // with its own NAME as content, so its "resolved digest" is the digest of a ref string, the
+    // same at freeze and at promote whatever the module registers. Driven by the lane's
+    // coordinator: freeze with the honest `check`, re-register `function/check@stable` as an
+    // always-pass closure, candidate `pick-empty` → `promote: true`. The fact that separates the
+    // two is the runtime's own: a body loaded from a resource runs in the realm, is branded, and
+    // is absent from `ReplayReport.liveBodies`; host code is named there (`Engine.#functionBody`
+    // records it at fetch). So a grader in `liveBodies` certifies nothing.
+    if (report.liveBodies.includes(String(task.taskId))) {
+      return no(`${scope}'s body ran as host code the runtime cannot vouch for, so the digest the freeze bound is not the body that ran`);
+    }
+    const served = servedTo(report.replayedEvents, task.taskId, now.reads, specs);
+    if (!served.decidable) return no(`what ${scope} was served is undecidable: ${served.reason}`);
+    const intervened = report.replayedEvents.find(
+      (e) =>
+        (e.taskId === task.taskId && (isEvent(e, "gate.raised") || isEvent(e, "hook.applied"))) ||
+        (isEvent(e, "graph.mutated") && e.seq < served.commit.seq),
+    );
+    if (intervened !== undefined) {
+      return no(`${scope}'s commit is not established to be its body's verdict (${intervened.type} at seq ${String(intervened.seq)})`);
+    }
+    if (Object.keys(served.commit.external).length > 0) return no(`${scope}'s verdict was externalised, so its pass cannot be read`);
+    const verdicts = Object.values(served.commit.writes).filter(
+      (v): v is Record<string, unknown> => typeof v === "object" && v !== null && Object.hasOwn(v, "pass"),
+    );
+    if (verdicts.length === 0) return no(`${scope} wrote no verdict`);
+    if (verdicts.some((v) => v["pass"] !== true)) return no(`${scope} did not pass it`);
+    if (verdicts.some((v) => isLowConfidence(v, now.threshold ?? Number.NEGATIVE_INFINITY))) {
+      return no(`${scope} passed it below its own threshold, which escalates rather than certifies`);
+    }
+    // ── 2: what was graded is what is kept ──
+    if (contentDigest(served, channel) !== kept) {
+      return no(`${scope} was served a different "${channel}" than the run ended with, so the value it graded is not the value kept`);
+    }
+    // ── 3: the truth it compared against is the recording's ──
+    for (const r of now.reads) {
+      if (r === channel) continue;
+      const truth = contentDigest(recorded, r);
+      if (truth === undefined) return no(`${scope} also reads "${r}", which is not an input the recording was submitted with`);
+      if (contentDigest(served, r) !== truth) return no(`${scope} was served a "${r}" that is not the recorded input`);
+    }
+    by.push({ grader: scope, taskId: String(task.taskId) });
+  }
+  return { ok: true, by };
+}
+
+/** The spec hash a recording was submitted with, or `undefined` when its journal cannot say. */
+async function submittedGraphHash(store: StateStore, runId: RunId): Promise<string | undefined> {
+  try {
+    for await (const e of store.read(runId, 1)) if (isEvent(e, "run.submitted")) return e.payload.graphHash;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The recording's submitted inputs, as the fold would seed them — externalised ones as handles,
+ * declared by `run.submitted.external` and never guessed from shape.
+ */
+async function recordedInputs(store: StateStore, runId: RunId): Promise<ChannelSnapshot> {
+  for await (const e of store.read(runId, 1)) {
+    if (!isEvent(e, "run.submitted")) continue;
+    const external = e.payload.external ?? {};
+    const channels: Record<string, unknown> = { ...e.payload.inputs };
+    for (const [c, ref] of Object.entries(external)) channels[c] = payloadHandle(ref);
+    return { channels, external };
+  }
+  return { channels: {}, external: {} };
 }
 
 /**
@@ -723,10 +936,50 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
   });
 
   const delta = input.candidate.passRate - input.baseline.passRate;
+  // THE BAR IS NOT LOWERED BY WHAT NOBODY MEASURED (§A.NEW-2). The baseline's pass rate is the
+  // number a candidate must not fall below, and every case the BASELINE fails lowers it. A baseline
+  // case that failed because its replay could not reproduce ITS OWN RECORDING failed for a reason
+  // not established to be the baseline's quality — so the bar counts it as one the baseline PASSED:
+  // the strictest bar consistent with not knowing, which never lowers it.
+  //
+  // THE FACT THIS KEYS ON IS "THE BASELINE GRAPH IS THE RECORDED ONE, AND THE REPLAY STILL DIVERGED".
+  // The first version keyed on `graph.match` being false too, and that is not evidence of anything:
+  // `graph.match` is false on EVERY case, by construction, whenever the operator passes a
+  // `--baseline` other than the graph the corpus was recorded with — and then every failed baseline
+  // case became a pass, so a candidate EQUAL to that baseline was refused where it had promoted
+  // (the coordinator's review of lane F: `50.0% vs baseline 50.0%`, bar 100.0%, refused). A graph
+  // the operator CHOSE differs because they chose it; its failures are measurements of that graph.
+  // So the set is: failed, on the recorded graph (`replay.graph.match`, or for a replay that threw,
+  // `recordedGraph.match` by spec hash), and not reproduced (`match: false`, or thrown). The
+  // alternative — keying on the non-graph divergence frames — was rejected: on a different graph
+  // those frames diverge BECAUSE the graph differs, which is the same confusion one level down.
+  //
+  // NOT A REFUSAL, AND NOT AN EXCLUSION. Refusing outright turns the check off for a candidate that
+  // clears even the strictest bar; excluding changes one side's denominator quietly. Counting the
+  // case as a baseline pass can only make `2-non-inferior` harder, and only on these cases.
+  const unreproduced = input.baseline.cases
+    .filter((k) =>
+      k.pass
+        ? false
+        : k.replay !== undefined
+          ? k.replay.graph.match && !k.replay.match
+          : k.recordedGraph?.match === true,
+    )
+    .map((k) => k.id);
+  const bar =
+    unreproduced.length === 0 || input.baseline.total === 0
+      ? input.baseline.passRate
+      : (input.baseline.passed + unreproduced.length) / input.baseline.total;
   checks.push({
     id: "2-non-inferior",
-    pass: delta >= -margin,
-    detail: `pass rate ${(input.candidate.passRate * 100).toFixed(1)}% vs baseline ${(input.baseline.passRate * 100).toFixed(1)}% (Δ ${(delta * 100).toFixed(1)}pp)`,
+    pass: input.candidate.passRate - bar >= -margin,
+    detail:
+      `pass rate ${(input.candidate.passRate * 100).toFixed(1)}% vs baseline ${(input.baseline.passRate * 100).toFixed(1)}% (Δ ${(delta * 100).toFixed(1)}pp)` +
+      (unreproduced.length === 0
+        ? ""
+        : ` — and the baseline FAILED ${String(unreproduced.length)} case(s) whose replay did not reproduce its own ` +
+          `recording (${unreproduced.slice(0, 3).join(", ")}${unreproduced.length > 3 ? ", …" : ""}), so the bar is taken as ` +
+          `if it had passed them: ${(bar * 100).toFixed(1)}% (Δ ${((input.candidate.passRate - bar) * 100).toFixed(1)}pp)`),
   });
 
   // A BASELINE THAT SPENT NOTHING IS NOT A BASELINE ANY CANDIDATE IS 1.00× OF. These two ratios
