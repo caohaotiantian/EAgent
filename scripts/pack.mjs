@@ -66,16 +66,15 @@
  * the first round, because nothing else in this file asks "is a dirty tree's change absent from
  * what gets archived". The test asks that one question, offline, against a throwaway ONE-commit
  * repo (TODO.md §A.91, the reviewer's third fix round (N1) — this said "two-commit" and the fixture
- * only ever makes one), with no real `tsc`/`npm pack` anywhere near it. That test does NOT pin that
- * `runPack` actually calls `archiveHeadInto` on the path that matters, only that the function
- * itself is correct — see its own docstring in `packages/core/test/scripts-pack.test.ts` for what
- * closing that gap would cost.
+ * only ever makes one), with no real `tsc`/`npm pack` anywhere near it. The CALL SITE is pinned too — TODO.md §H.22: `runPack(argv, root)` takes the checkout as a
+ * parameter so the test can pack a tiny real repository holding an uncommitted edit and file and read
+ * the tarball. A directory nested inside another repository is refused by name — §H.23.
  *
  *     node scripts/pack.mjs --out DIR     → DIR/caohaotiantian-loom-<version>.tgz, path on stdout
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -170,7 +169,13 @@ export function archiveHeadInto(repoRoot, headSha, destDir) {
   execFileSync("tar", ["-x", "-C", destDir], { input: archive });
 }
 
-function runPack(argv) {
+/**
+ * @param {string[]} argv
+ * @param {string} [root] - the checkout to pack. Defaults to THIS repository; a parameter only so
+ *   `packages/core/test/scripts-pack.test.ts` can drive the whole path over a throwaway repo
+ *   (TODO.md §H.22) — the CLI never passes it.
+ */
+export function runPack(argv, root = repoRoot) {
   const stray = argv.filter((a, i) => !(a === "--out" || a.startsWith("--out=") || argv[i - 1] === "--out"));
   if (stray.length > 0) {
     console.error(`pack FAILED: unknown argument ${stray.join(" ")} — the only one is --out DIR.`);
@@ -197,7 +202,20 @@ function runPack(argv) {
     // `stdio: ["ignore","pipe","pipe"]`, so a failure's stderr reaches THIS message once — the
     // default inherits stdio, which printed git's own "fatal: not a git repository" a second
     // time, ahead of and separate from this script's own diagnosis of the same fact.
-    const gitStdio = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: gitEnv() };
+    const gitStdio = { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: gitEnv() };
+    // WHICH REPOSITORY `git` RESOLVED, NAMED — TODO.md §H.23. A directory that is not itself a
+    // repository but sits inside another one (an unpacked copy under a parent checkout) answers
+    // `rev-parse HEAD` with the PARENT's commit, and the refusal that followed said "the archived
+    // commit <sha> does not compile" — true of nothing this script was asked about.
+    const top = execFileSync("git", ["rev-parse", "--show-toplevel"], gitStdio).trim();
+    if (realpathSync(top) !== realpathSync(root)) {
+      fail(
+        `${root} is not the root of a git repository — \`git\` resolved it to the repository at ${top}, a different one. ` +
+          `Packing sources HEAD of the repository AT ${root}; a directory nested inside another checkout has no HEAD of its own, ` +
+          `and packing the enclosing repository's would ship a tree this script was never pointed at.`,
+      );
+      return;
+    }
     headSha = execFileSync("git", ["rev-parse", "HEAD"], gitStdio).trim();
     // DETACHED READS "HEAD" FROM THIS COMMAND, so it is renamed for the operator: "HEAD" printed
     // next to a sha that is ALSO what `rev-parse HEAD` names is confusing in a way "detached"
@@ -222,11 +240,11 @@ function runPack(argv) {
   try {
     const checkout = join(scratch, "checkout");
     mkdirSync(checkout, { recursive: true });
-    archiveHeadInto(repoRoot, headSha, checkout);
+    archiveHeadInto(root, headSha, checkout);
     // BORROWED, NOT COPIED: `node_modules` holds no source `check-zero-dep.mjs` cares about, and
     // `git archive` never contains it (it is gitignored) — the checkout cannot compile without it.
-    if (existsSync(join(repoRoot, "node_modules"))) {
-      symlinkSync(join(repoRoot, "node_modules"), join(checkout, "node_modules"), "dir");
+    if (existsSync(join(root, "node_modules"))) {
+      symlinkSync(join(root, "node_modules"), join(checkout, "node_modules"), "dir");
     }
     const CORE = join(checkout, "packages", "core");
     const DIST = join(CORE, "dist");
@@ -259,10 +277,10 @@ function runPack(argv) {
     // `git ls-tree`, NOT `git ls-files` — `ls-files` reads the INDEX/working tree and the
     // checkout has no `.git` at all (`git archive`'s output is a plain file tree, deliberately:
     // that is what makes it immune to a dirty index). `ls-tree -r` at `headSha`, run from
-    // `repoRoot` where `.git` actually lives, is the one query that names what was tracked AT
+    // `root` where `.git` actually lives, is the one query that names what was tracked AT
     // THAT COMMIT regardless of what the working tree looks like right now.
     const tracked = new Set(
-      execFileSync("git", ["ls-tree", "-r", "--name-only", headSha, "--", "packages/core/src"], { cwd: repoRoot, encoding: "utf8", env: gitEnv() })
+      execFileSync("git", ["ls-tree", "-r", "--name-only", headSha, "--", "packages/core/src"], { cwd: root, encoding: "utf8", env: gitEnv() })
         .split("\n")
         .filter((l) => l.length > 0),
     );

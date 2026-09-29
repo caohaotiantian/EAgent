@@ -19,11 +19,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { archiveHeadInto, classifyShippedSource, namesASourceMap } from "../../../scripts/pack.mjs";
+import { archiveHeadInto, classifyShippedSource, namesASourceMap, runPack } from "../../../scripts/pack.mjs";
 
 test("classifyShippedSource: ok, orphan, untracked — the three answers TODO.md §H.17 and §A.91 M3 name", () => {
   assert.equal(classifyShippedSource(true, true), "ok", "a source that exists and is tracked ships clean");
@@ -60,17 +61,7 @@ test("namesASourceMap: a pointer at line start, never a bare substring — TODO.
  * gets packed? This test asks it directly, offline and fast — a throwaway ONE-commit repo, no real
  * `tsc`/`npm pack` anywhere near it.
  *
- * WHAT THIS DOES NOT PIN — TODO.md §A.91, the reviewer's third fix round (N1), said rather than
- * left implicit: this asserts `archiveHeadInto` itself is correct, never that `runPack` actually
- * CALLS it on the path that matters. A mutant that swapped the call site back to compiling the
- * working tree directly — an `rsync`-the-tree-instead-of-`git archive` regression — would leave
- * this file, and every other check in it, green: none of them drive `runPack`'s own dirty-tree
- * behavior end to end (that needs a real `tsc -b --force`, which this file's own docstring says it
- * is deliberately not paying for). Closing that gap costs one of: exporting `runPack`'s pre-compile
- * stage so a test can assert it called `archiveHeadInto` rather than a raw copy, or a `--dry-run`/
- * staging flag that stops after the archive step and reports what it archived. Neither is done
- * here; this is residue, not a fix, and `scripts/pack.mjs`'s own docstring is the place a reader
- * would look for the call site this test does not reach.
+ * The CALL SITE is pinned by the `runPack` test below (TODO.md §H.22); this one pins the function.
  */
 test("archiveHeadInto: a dirty working tree's change is ABSENT from the archived checkout", () => {
   const repo = mkdtempSync(join(tmpdir(), "loom-archive-src-"));
@@ -112,4 +103,115 @@ test("archiveHeadInto: a dirty working tree's change is ABSENT from the archived
     rmSync(repo, { recursive: true, force: true });
     rmSync(dest, { recursive: true, force: true });
   }
+});
+
+/**
+ * `runPack` ITSELF, END TO END, OVER A THROWAWAY REPOSITORY — TODO.md §H.22.
+ *
+ * The test above pins `archiveHeadInto`, not the CALL: a `runPack` that copied the working tree
+ * into its scratch checkout instead stayed green, and its success line ("every one compiled from a
+ * clean archive of that commit") then lied about what shipped. This packs a real (tiny) checkout —
+ * a real `git archive`, a real `tsc -b --force`, a real offline `npm pack` — holding a committed
+ * file, a tracked file with an uncommitted edit, and an untracked file, and reads the TARBALL.
+ * Mutant: `archiveHeadInto(root, headSha, checkout)` → `cpSync(root, checkout, { recursive: true })`
+ * (minus `.git`) turns this red on the edited file's bytes.
+ */
+test("runPack: an uncommitted edit and an uncommitted file are ABSENT from the tarball — TODO.md §H.22", (t) => {
+  const repo = mkdtempSync(join(tmpdir(), "loom-runpack-src-"));
+  const out = mkdtempSync(join(tmpdir(), "loom-runpack-out-"));
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+  t.after(() => rmSync(out, { recursive: true, force: true }));
+  const cleanEnv = { ...process.env };
+  delete cleanEnv["GIT_DIR"];
+  delete cleanEnv["GIT_WORK_TREE"];
+  delete cleanEnv["GIT_INDEX_FILE"];
+  const git = (...args: string[]): string =>
+    execFileSync("git", args, {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...cleanEnv, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid" },
+    });
+  const put = (rel: string, text: string): void => {
+    mkdirSync(dirname(join(repo, rel)), { recursive: true });
+    writeFileSync(join(repo, rel), text);
+  };
+  git("init", "-q");
+  put(".gitignore", "node_modules\ndist\n*.tsbuildinfo\n");
+  put("tsconfig.json", JSON.stringify({ files: [], references: [{ path: "packages/core" }] }));
+  put(
+    "packages/core/tsconfig.json",
+    JSON.stringify({
+      compilerOptions: { composite: true, outDir: "dist", rootDir: "src", declaration: true, sourceMap: true, module: "nodenext", target: "es2022", strict: true, types: [] },
+      include: ["src"],
+    }),
+  );
+  put("packages/core/package.json", JSON.stringify({ name: "@example/tiny", version: "0.0.1", type: "module", files: ["dist/**/*.js", "dist/**/*.d.ts"], main: "dist/index.js" }));
+  put("packages/core/README.md", "tiny\n");
+  put("packages/core/LICENSE", "none\n");
+  for (const f of ["bin", "cli"]) put(`packages/core/src/${f}.ts`, `export const ${f}: string = "committed";\n`);
+  put("packages/core/src/index.ts", 'export const marker: string = "COMMITTED-MARKER";\n');
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+  // BORROWED, as `runPack` borrows it into the archive: the compiler lives in the real one.
+  symlinkSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "node_modules"), join(repo, "node_modules"), "dir");
+
+  // THE DIRTYING: a tracked file edited, and a file that exists nowhere in git.
+  put("packages/core/src/index.ts", 'export const marker: string = "DIRTY-MARKER";\n');
+  put("packages/core/src/extra.ts", 'export const extra: string = "UNCOMMITTED-FILE";\n');
+
+  const realLog = console.log;
+  const realErr = console.error;
+  const lines: string[] = [];
+  const priorExit = process.exitCode;
+  console.log = (...a: unknown[]): void => void lines.push(a.join(" "));
+  console.error = (...a: unknown[]): void => void lines.push(a.join(" "));
+  try {
+    runPack(["--out", out], repo);
+    assert.notEqual(process.exitCode, 1, `runPack refused:\n${lines.join("\n")}`);
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+    process.exitCode = priorExit;
+  }
+  const tarball = lines.find((l) => l.endsWith(".tgz"));
+  assert.ok(tarball !== undefined, `runPack printed no tarball path:\n${lines.join("\n")}`);
+  const listing = execFileSync("tar", ["-tzf", tarball!], { encoding: "utf8" });
+  const index = execFileSync("tar", ["-xzOf", tarball!, "package/dist/index.js"], { encoding: "utf8" });
+  assert.match(index, /COMMITTED-MARKER/, "the tarball holds HEAD's bytes");
+  assert.doesNotMatch(index, /DIRTY-MARKER/, "an uncommitted edit reached the tarball");
+  assert.doesNotMatch(listing, /extra/, "an uncommitted file reached the tarball");
+  assert.match(lines.join("\n"), /uncommitted change\(s\), left out of this pack/, "the dirty tree is named, not silently dropped");
+});
+
+test("runPack: a directory nested inside another repository is refused BY NAME — TODO.md §H.23", (t) => {
+  const outer = mkdtempSync(join(tmpdir(), "loom-nested-"));
+  const out = mkdtempSync(join(tmpdir(), "loom-nested-out-"));
+  t.after(() => rmSync(outer, { recursive: true, force: true }));
+  t.after(() => rmSync(out, { recursive: true, force: true }));
+  const cleanEnv = { ...process.env };
+  delete cleanEnv["GIT_DIR"];
+  delete cleanEnv["GIT_WORK_TREE"];
+  delete cleanEnv["GIT_INDEX_FILE"];
+  execFileSync("git", ["init", "-q"], { cwd: outer, env: cleanEnv });
+  execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], {
+    cwd: outer,
+    env: { ...cleanEnv, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid" },
+  });
+  const nested = join(outer, "loom");
+  mkdirSync(nested);
+
+  const realErr = console.error;
+  const lines: string[] = [];
+  const priorExit = process.exitCode;
+  console.error = (...a: unknown[]): void => void lines.push(a.join(" "));
+  try {
+    runPack(["--out", out], nested);
+    assert.equal(process.exitCode, 1);
+  } finally {
+    console.error = realErr;
+    process.exitCode = priorExit;
+  }
+  const said = lines.join("\n");
+  assert.ok(said.includes(realpathSync(outer)), `the refusal must name the repository git resolved (${realpathSync(outer)}):\n${said}`);
+  assert.doesNotMatch(said, /does not compile/, "it used to blame a compile of a commit that was never this directory's");
 });
