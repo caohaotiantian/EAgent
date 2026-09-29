@@ -30,7 +30,7 @@ a production resource ROUTED BY CEREMONY: 12 nodes over four node types, 13 edge
 `router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, and a node reached by two
 mutually exclusive paths that runs exactly once (a fourth, the `merge_object` reducer, went at
 `43150c24` once §A.94 made it unnecessary), which is why it was worth doing: it overlaps port 1 in
-`human_gate`, `function`, `tool`, `fs.*`, `seq` and `replace`, and port 2 in `conditional`.
+`human_gate`, `function`, `tool`, `fs.*`, `seq` and `replace`, and port 2 in `conditional` besides.
 
 **Running the FIRST needed no source change; making it NATURAL needed eight, and THAT is the number
 worth carrying.** All eight are closed, and the workflow CONSUMES what they built — `triage-plan.js`
@@ -90,7 +90,7 @@ hatch and also the ledger; **read the ledger from `node scripts/check-kernel.mjs
 `feat:`-only; the census counts every subject, merges included. They share ONE definition of a
 trailer — `seamTrailer()`: a `Kernel-seam:` line in the message's own FINAL PARAGRAPH, with
 flush-left continuation lines allowed, which git's `interpret-trailers --parse` rejects and which
-seven of the twenty declared seams are written as. Where they still differ is what "touched the
+eight of the twenty-one declared seams are written as. Where they still differ is what "touched the
 kernel" means for a MERGE: the requirement reads the commit's own diff (`git show --name-only` —
 empty for a clean merge, the resolution's own changes for an evil one), the census reads its
 effective diff (`-m`, one per parent). So a clean merge cannot violate, its branch having been read
@@ -242,8 +242,8 @@ docs/              dated records w/ repros. START: handoff-2026-09-29.md, audit-
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every 2026-09-29 lane is merged into `loom` (item 31's first slice was in flight at settlement);
-the handoff says what each did and left open, and which lane claims did not survive a re-run.
+Every 2026-09-29 lane is merged into `loom`; the handoff says what each did and left open, and
+which lane claims did not survive a re-run.
 
 ## Commands
 
