@@ -24,7 +24,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { archiveHeadInto, classifyShippedSource, namesASourceMap, runPack } from "../../../scripts/pack.mjs";
+import * as packModule from "../../../scripts/pack.mjs";
+import { archiveHeadInto, classifyShippedSource, namesASourceMap } from "../../../scripts/pack.mjs";
+
+// `scripts/pack.d.mts` (not this lane's file) declares three exports; `runPack` is a fourth.
+const runPack = (packModule as unknown as { runPack: (argv: string[], root?: string) => void }).runPack;
 
 test("classifyShippedSource: ok, orphan, untracked — the three answers TODO.md §H.17 and §A.91 M3 name", () => {
   assert.equal(classifyShippedSource(true, true), "ok", "a source that exists and is tracked ships clean");
