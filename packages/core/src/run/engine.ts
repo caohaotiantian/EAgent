@@ -299,6 +299,21 @@ export interface SubmitInput {
    * tightening. The default — absent — is what every existing caller already produces.
    */
   readonly taintedInputs?: readonly string[];
+  /**
+   * How long the compile that produced `graph` took, in milliseconds, MEASURED BY THE CALLER —
+   * journaled as `run.compiled.durationMs` and read by `telemetry/spans.ts`'s `loom.compile`.
+   *
+   * THE CALLER'S, because the compile is: `compileOrThrow` is pure and runs before this method,
+   * so neither `submit` nor the `RunGraph` can know when it started. Pass it only for a compile
+   * done FOR THIS RUN — `loom run` does, and so does `#runSubgraph` on a compile-cache miss. A
+   * graph compiled once and submitted many times passes nothing, and that absence is the
+   * truthful "not measured", not a zero.
+   *
+   * A value that is not a finite, non-negative number is DROPPED rather than refused: it is a
+   * telemetry fact no decision reads, and a bad clock reading must neither fail a run nor put a
+   * negative-width span on its trace.
+   */
+  readonly compileDurationMs?: number;
 }
 
 /**
@@ -2679,7 +2694,7 @@ export class Engine {
     if (spec === undefined) return undefined;
     try {
       const wasForgotten = this.#forgotten.has(childRunId);
-      const built = this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
+      const built = this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph).graph, undefined, parent.grantBound);
       if (wasForgotten) this.#forgotten.add(childRunId);
       installed?.set(childRunId, built);
       return built;
@@ -3239,6 +3254,13 @@ export class Engine {
           // does not move while any other node holds it. Sorted so two compiles of one spec
           // journal the identical row.
           postures: compiledPostures(input.graph),
+          // THE CALLER'S MEASUREMENT, OR NOTHING — see `SubmitInput.compileDurationMs`. This row,
+          // `run.submitted`, `run.started` and the entry `task.ready`s share one append and one
+          // `ts`, so the compile ENDED at or before that instant; `spansFrom` draws it as
+          // `[ts − durationMs, ts]` and draws nothing when the field is absent.
+          ...(typeof input.compileDurationMs === "number" && Number.isFinite(input.compileDurationMs) && input.compileDurationMs >= 0
+            ? { durationMs: input.compileDurationMs }
+            : {}),
         },
         actor: SYSTEM_ACTOR("compiler"),
       },
@@ -6943,7 +6965,9 @@ export class Engine {
             [
               {
                 type: "task.leased",
-                payload: { workerId: this.#workerId, attempt: w.task.attempt + 1 },
+                // `nodeType` is descriptive — `telemetry/spans.ts`'s `node.type` — and nothing
+                // folds it, so adding it moved neither the seq nor anything a replay compares.
+                payload: { workerId: this.#workerId, attempt: w.task.attempt + 1, nodeType: w.node.type },
                 actor: SYSTEM_ACTOR("scheduler"),
                 taskId: w.task.taskId,
               },
@@ -9653,7 +9677,7 @@ export class Engine {
     if (childSpec === undefined) {
       throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `subgraph "${sub.ref}" does not resolve to a GraphSpec`);
     }
-    const childGraph = this.#compileChild(sub.ref, childSpec, ctx.graph);
+    const { graph: childGraph, durationMs: childCompileMs } = this.#compileChild(sub.ref, childSpec, ctx.graph);
 
     // DERIVED, like every other id here: replay and a restart must find the same child.
     const childRunId = `${ctx.runId}~${w.task.taskId}` as RunId;
@@ -9773,6 +9797,8 @@ export class Engine {
         ...(slice === undefined ? {} : { budgetUsd: slice }),
         ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
         ...(taintedInputs.length === 0 ? {} : { taintedInputs }),
+        // Present only when THIS call compiled the child — see `#compileChild`.
+        ...(childCompileMs === undefined ? {} : { compileDurationMs: childCompileMs }),
       });
     } else {
       // THE PARENT'S CEILING TRAVELS on the resume path too — `#contextFor` returns an existing
@@ -10204,8 +10230,14 @@ export class Engine {
     await this.cancel(childRunId, reason, SYSTEM_ACTOR("executor:subgraph-cancel"));
   }
 
-  /** Compile a child graph once per (ref, spec). The spec is per-run now, so the ref alone stales. */
-  #compileChild(ref: string, spec: GraphSpec, parent: RunGraph): RunGraph {
+  /**
+   * Compile a child graph once per (ref, spec). The spec is per-run now, so the ref alone stales.
+   *
+   * `durationMs` is the compile's own time on `this.#now`, present ONLY when this call compiled —
+   * a cache hit ran no compile for anybody, so it answers absent rather than a zero it did not
+   * measure. `#runSubgraph` hands it to the child's `submit` as `compileDurationMs`.
+   */
+  #compileChild(ref: string, spec: GraphSpec, parent: RunGraph): { readonly graph: RunGraph; readonly durationMs?: number } {
     // KEYED BY EVERY INPUT THE COMPILE HAS, which the ref alone stopped being the moment the
     // spec started coming from a per-run `RunGraph`: two runs on one long-lived process can
     // carry different frozen children for one ref, and the cache served the first run's
@@ -10216,7 +10248,7 @@ export class Engine {
     // first one's prompts.
     const key = `${ref}@${digest(spec)}@${parent.graphHash}`;
     const hit = this.#childGraphs.get(key);
-    if (hit !== undefined) return hit;
+    if (hit !== undefined) return { graph: hit };
     // BOUNDED, because widening that key widened this cache. It held compiled `RunGraph`s for
     // the life of the process with nothing to evict them: `#retire` declines to touch it, for a
     // correct reason — the cache is keyed by ref rather than by run, so per-run eviction would
@@ -10253,6 +10285,7 @@ export class Engine {
       const oldest = this.#childGraphs.keys().next();
       if (oldest.done !== true) this.#childGraphs.delete(oldest.value);
     }
+    const began = this.#now();
     const compiled = compileOrThrow({
       spec,
       // WHAT THE PARENT FROZE, THEN THE LIVE STORE — `frozenFirst` covers `resolve`, `document`
@@ -10271,7 +10304,7 @@ export class Engine {
       tenantCapabilities: this.#policyOpts.granted,
     });
     this.#childGraphs.set(key, compiled);
-    return compiled;
+    return { graph: compiled, durationMs: this.#now() - began };
   }
 
   /**
