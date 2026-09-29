@@ -262,7 +262,7 @@ async function inAnEmptyDirectory(argv: readonly string[]): Promise<{ code: numb
 }
 
 /** Readers that refuse a value GIVEN rather than one missing. Named, so a second joins on purpose. */
-const TAKES_NO_VALUE: ReadonlySet<string> = new Set(["version"]);
+const TAKES_NO_VALUE: ReadonlySet<string> = new Set(["help", "version"]);
 
 test("EVERY FLAG `FLAGS` NAMES A READER FOR REFUSES A MISSING VALUE WITH NOTHING ON DISK", async () => {
   // NOT A LIST RESTATED HERE: the flags are the non-null rows of `FLAGS`, and the verb each one
@@ -283,7 +283,7 @@ test("EVERY FLAG `FLAGS` NAMES A READER FOR REFUSES A MISSING VALUE WITH NOTHING
     // at 15s, so a mutation that removed the refusal fails loudly instead of hanging the suite.
     const verb = globals.has(flag) ? "compile" : ([...rows].find(([v, fs]) => v !== "serve" && fs.includes(flag))?.[0] ?? [...rows].find(([, fs]) => fs.includes(flag))?.[0]);
     assert.ok(verb !== undefined, `--${flag} has a reader and belongs to no verb — \`refuseFlagsThisVerbDoesNotRead\` would reject it everywhere`);
-    // `--version` is the one reader whose BARE form is the valid one — it asks a question and
+    // `--help` and `--version` are the readers whose BARE form is the valid one — it asks a question and
     // takes no value — so the mistake its reader refuses is the opposite shape: a value given.
     const argv = TAKES_NO_VALUE.has(flag) ? [verb, `--${flag}`, "x"] : [verb, `--${flag}`];
     const { code, err, left } = await inAnEmptyDirectory(argv);
