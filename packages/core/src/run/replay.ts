@@ -585,6 +585,12 @@ export interface ReplayReport {
    * Reported whatever `onGraphChange` says, including under `"allow"`: opting out changes
    * the VERDICT, never the record. A caller that suppressed the frame can still see, and
    * journal, that it replayed a candidate.
+   *
+   * `match` INCLUDES THIS RUN'S SUCCESSORS (§A.102): `recorded`/`replayed` are the SUBMITTED
+   * hashes, but a run that mutated ran under the graphs its own `graph.mutated` rows adopted too,
+   * and `match` is false when any of those the replay did not reproduce — see `unboundSuccessors`.
+   * NOT a subgraph child's: a child is served as a `subgraph` effect, never re-run, so neither its
+   * `run.compiled` manifest nor its successors are bound here.
    */
   readonly graph: {
     readonly recorded: string;
@@ -658,6 +664,98 @@ function describeRefDrift(
   return out;
 }
 
+/** A manifest as one comparable string — the normalisation `engine.ts`'s `manifestKey` applies. */
+function refKey(m: readonly { readonly ref: string; readonly digest: string }[]): string {
+  return m
+    .map((r) => `${r.ref}=${r.digest}`)
+    .sort()
+    .join("\n");
+}
+
+/**
+ * Every successor this run's own journal adopted that the replay did not reproduce, as a
+ * `graph.bound` frame body (§A.102). A subgraph child's successors are not read — see
+ * `ReplayReport.graph`.
+ *
+ * WHY THIS EXISTS: `refsBound` reads `run.compiled`'s manifest, which names the AUTHORED graph's
+ * refs and nothing else. A ref a mutation INTRODUCED is resolved live when the mutation is adopted
+ * (`frozenFirst` in `engine.ts`) and its digest is written down in exactly one place, the
+ * `graph.mutated` row's `resolutionManifest` (§G.5). The replay re-adopts the served proposal and
+ * resolves that ref live again, so editing its file changed what the shadow ran while the hash and
+ * `run.compiled`'s manifest stayed identical — and the replay reported `match: true`. Measured on
+ * this build twice: a mutation-added `human_gate` whose oversight ref moved (engine-level), and a
+ * journal written by the binary (`loom run --grant graph:mutate --extension-module`) whose
+ * mutation-added `function/added.js` was then edited, replayed by a direct `replayRun` call
+ * handed the workspace's resolver — NOT by `loom replay`, which passes no resolver, so there a
+ * mutation-added published ref is unresolvable in the shadow whether or not it moved.
+ *
+ * COMPARED AGAINST THE SHADOW'S OWN `graph.mutated` ROWS, not against a re-resolution done here.
+ * The shadow is an ordinary Engine, so its i-th row carries the manifest of the successor it
+ * actually adopted and ran; re-deriving that in this file would be a second implementation of
+ * `compileMutation` + `frozenFirst` that could disagree with the first. The cost is that this can
+ * only be known after the shadow ran, which is why `onGraphChange: "throw"` refuses this half late.
+ *
+ * PAIRED BY JOURNAL ORDER over the RAW rows, as `#rehydrateGraph` reads them: a recording's k-th
+ * adoption is the replay's k-th. EVERY UNDECIDABLE CASE IS UNBOUND, never bound:
+ *   - a recorded row with NO manifest — a journal written before §G.5 (`4fe87a88`). Nothing to
+ *     compare against; the engine refuses to decide on such a run too (`E_GRAPH_MISMATCH`,
+ *     `unrecorded`), and a replay certifying it would be the passing value for "cannot tell";
+ *   - a recorded successor the replay never adopted — the resolver cannot read an added ref and
+ *     the mutation refused, or the run diverged before the proposal;
+ *   - a successor the replay adopted that the recording has no row for.
+ * A resolver that cannot read an added ref need not refuse the mutation — measured for a
+ * `human_gate`'s oversight ref, which `compileMutation` drops from the successor's manifest — and
+ * that lands here as `ref=(absent)`: unbound.
+ */
+function unboundSuccessors(
+  recorded: readonly JournalEvent[],
+  replayed: readonly JournalEvent[],
+): { readonly taskId?: string; readonly expected: string; readonly actual: string }[] {
+  const rows = (events: readonly JournalEvent[]) =>
+    events.flatMap((e) => (isEvent(e, "graph.mutated") ? [e.payload] : []));
+  const was = rows(recorded);
+  const now = rows(replayed);
+  const out: { taskId?: string; expected: string; actual: string }[] = [];
+  for (let i = 0; i < Math.max(was.length, now.length); i++) {
+    const a = was[i];
+    const b = now[i];
+    if (a === undefined) {
+      // `b` is defined: the loop bound is the longer list.
+      out.push({ taskId: b!.proposedBy, expected: "(no recorded successor)", actual: b!.newHash });
+      continue;
+    }
+    if (b === undefined) {
+      out.push({ taskId: a.proposedBy, expected: a.newHash, actual: "(successor not adopted)" });
+      continue;
+    }
+    // `Array.isArray`, not `=== undefined`: a row whose field is anything but a list is as
+    // uncomparable as one without it, and must say so rather than throw a TypeError.
+    if (!Array.isArray(a.resolutionManifest)) {
+      out.push({
+        taskId: a.proposedBy,
+        expected: `${a.newHash} (no manifest recorded — the row predates graph.mutated.resolutionManifest)`,
+        actual: b.newHash,
+      });
+      continue;
+    }
+    if (a.newHash !== b.newHash) {
+      out.push({ taskId: a.proposedBy, expected: a.newHash, actual: b.newHash });
+      continue;
+    }
+    const recordedRefs: readonly { ref: string; digest: string }[] = a.resolutionManifest;
+    const replayedRefs = b.resolutionManifest ?? [];
+    if (refKey(recordedRefs) === refKey(replayedRefs)) continue;
+    const drift = describeRefDrift(recordedRefs, replayedRefs);
+    // A difference `describeRefDrift` cannot name (a ref listed twice) still prints both sides.
+    out.push({
+      taskId: a.proposedBy,
+      expected: drift.length === 0 ? refKey(recordedRefs) : drift.map((r) => `${r.ref}=${short(r.was)}`).join(", "),
+      actual: drift.length === 0 ? refKey(replayedRefs) : drift.map((r) => `${r.ref}=${short(r.now)}`).join(", "),
+    });
+  }
+  return out;
+}
+
 export interface ReplayOptions {
   readonly store: StateStore;
   readonly runId: RunId;
@@ -678,8 +776,10 @@ export interface ReplayOptions {
    * What to do when `graph` is not the graph the journal came out of.
    *
    * `"diverge"` (default) runs the replay and reports `match: false` with a `graph.bound`
-   * frame. `"throw"` refuses before serving a single result. `"allow"` runs and does not
-   * count the change against `match`.
+   * frame. `"throw"` refuses before serving a single result — except for a SUCCESSOR a recorded
+   * mutation adopted, which exists only once its proposal is served, so that half refuses after
+   * the shadow ran (`unboundSuccessors`). `"allow"` runs and does not count the change against
+   * `match`.
    *
    * THE OPT-OUT IS NAMED RATHER THAN DEFAULTED, and the asymmetry is deliberate. Replaying
    * against a different graph is a real thing to want — it is `runEvalSuite`'s entire job —
@@ -755,11 +855,6 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   // journals what each ref resolved to; binding it costs a comparison.
   const compiled = events.find((e) => isEvent(e, "run.compiled"));
   const recordedRefs = compiled !== undefined && isEvent(compiled, "run.compiled") ? compiled.payload.resolutionManifest : [];
-  const refKey = (m: readonly { ref: string; digest: string }[]): string =>
-    m
-      .map((r) => `${r.ref}=${r.digest}`)
-      .sort()
-      .join("\n");
   const recordedManifest = refKey(recordedRefs);
   const replayedManifest = refKey(opts.graph.resolutionManifest);
   const refsBound = recordedManifest === "" || recordedManifest === replayedManifest;
@@ -902,6 +997,19 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   const replayedEvents: JournalEvent[] = [];
   for await (const e of shadow.read(replayRunId, 1)) replayedEvents.push(e);
   const { rebound, unverifiedModels, unverifiedTools } = reboundEffects(events, replayedEvents);
+  // THE SUCCESSORS' HALF OF THE BINDING (§A.102) — see `unboundSuccessors`. Known only now: a
+  // successor exists once the recorded proposal has been served, so `"throw"` refuses this half
+  // after the shadow ran rather than before. The shadow is an in-memory store no control plane
+  // reaches; what ran in it is what the `"diverge"` default runs anyway.
+  const successors = unboundSuccessors(events, replayedEvents);
+  if (successors.length > 0 && opts.onGraphChange === "throw") {
+    throw err.internal(
+      CODES.E_REPLAY_DIVERGENCE,
+      `run ${opts.runId} adopted ${successors.length === 1 ? "a successor graph" : `${String(successors.length)} successor graphs`} this replay did not reproduce — ` +
+        "details.successors names each one and why",
+      { details: { successors } },
+    );
+  }
 
   const frames = compare(original, replayed, effects);
   // Appended after `compare`, so the frame seq numbers of the three original kinds are
@@ -929,6 +1037,15 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
       expected: drift === undefined ? recordedGraph : drift.map((r) => `${r.ref}=${short(r.was)}`).join(", "),
       actual: drift === undefined ? opts.graph.graphHash : drift.map((r) => `${r.ref}=${short(r.now)}`).join(", "),
     });
+  }
+  // One `graph.bound` frame per unbound successor, named by the task that proposed it. Suppressed
+  // under `"allow"` exactly as the submitted graph's frame is — the same binding, one graph over.
+  // And only when the SUBMITTED graph is bound: otherwise its frame above already fails `match`,
+  // and every successor differs from the recording as a consequence (its parent hash or the
+  // authored refs it carries), so a frame each would repeat that one difference. `graph.match`
+  // still counts them either way.
+  if (opts.onGraphChange !== "allow" && graphBound) {
+    for (const s of successors) frames.push({ seq: seq++, kind: "graph.bound", match: false, ...s });
   }
   for (const r of rebound) {
     frames.push({ seq: seq++, kind: "effect.rebound", match: false, expected: r.recorded, actual: r.replayed });
@@ -971,7 +1088,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
       effects.derivedClocks.length === 0 &&
       effects.derivedSeeds.length === 0 &&
       effects.liveBodies.length === 0,
-    graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound },
+    graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound && successors.length === 0 },
     reboundEffects: rebound,
     unverifiedModelEffects: unverifiedModels,
     unverifiedToolEffects: unverifiedTools,

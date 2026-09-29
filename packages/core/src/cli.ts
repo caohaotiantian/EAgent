@@ -2481,7 +2481,7 @@ export function openWorkspace(
     // them would be inherited object and all. It is absent because every caller passes a
     // hand-built literal instead. THE THREE, named because the guarantee is their conjunction and
     // not one refusal: `case "replay"` below (`tools, functions, models, hooks, policy,
-    // payloads`), `agent.ts`'s `engineOptions`, and `evolution/gate.ts`'s `replayRun`, which
+    // payloads, resolver`), `agent.ts`'s `engineOptions`, and `evolution/gate.ts`'s `replayRun`, which
     // forwards whatever ITS caller gave — for the CLI, the literal built in `case "promote"`.
     // A fourth that spread `ws.engine`'s own options would hand a replay this scheduler.
     scheduler: new InProcessScheduler({ strandedLeaseMs: STRANDED_LEASE_MS }),
@@ -9450,6 +9450,12 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             // store journals the value where the recording journaled a handle, so every run
             // that externalised anything reported `match: false` about itself.
             payloads: ws.payloads,
+            // AND THE SAME RESOLVER — `ws.resolver`, the object `loom run`'s Engine resolves
+            // through, a module's substitute included. A replay re-adopts every recorded mutation
+            // and resolves the refs it ADDED live; with none passed the Engine resolves nothing,
+            // so a mutation-added `function` failed the shadow's compile (GRAPH015) edited or
+            // not, and a module-resolved ref went missing from the successor (§A.102).
+            resolver: ws.resolver,
           },
         });
         // NOT `writeDiagnostic`, and the reason is what the line IS. §H.14 gave the compile
@@ -10148,6 +10154,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           // and then blames the run for the difference.
           hooks: ws.hooks,
           policy: { granted: ws.granted },
+          // And its resolver, for the reason `loom replay` gives: a recording that mutated is
+          // re-adopted in each replay, and its added refs resolve through this or not at all.
+          resolver: ws.resolver,
         };
 
         const baseReport = await runEvalSuite({ store: ws.store, suite, graph: baseline, engine });
