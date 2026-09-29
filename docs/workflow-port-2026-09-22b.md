@@ -816,6 +816,8 @@ That run is parked on its gate, which is all F2 and F3 need — neither answers 
 *Note, 2026-09-24 (settlement): CLOSED as `TODO.md` §A.94 at `b7b44eda`/`5db93cf6`/`3731883a` —
 `grant-access` with `history: replace` now compiles clean. The shipped graph still uses
 `merge_object`; the entry below is the record as it stood.*
+*Note, 2026-09-29 (settlement): it no longer does — `history` is `replace` since `43150c24`
+(`TODO.md` §A.127), so §1's reducer row and its item 3 describe the graph as it shipped then.*
 
 **Tried.** The obvious graph. One node reads a file; on success a body parses it, on failure a body
 supplies the empty case. Both write the same channel, because they are two ways of producing one
@@ -1668,6 +1670,12 @@ nothing else.*
   none has anywhere better to live while those rows are open. (The count said five and listed six.
   `node -e` over `metadata.labels` says six. §4's own sentence about counts carried rather than
   re-read applies to this document as readily as to its subject.)
+  *Note, 2026-09-29 (settlement): the shipped graph now carries FIVE — `reads-as`,
+  `residue-static-approvers`, `compiles-silent`, `error-arm-reads-the-code` and
+  `compensation-fires-without-an-edge` (`node -e` over `metadata.labels`). `residue-blind-error-arm`
+  went with D8 phase one (`6a03694d`), which added `error-arm-reads-the-code`, and
+  `residue-error-arm` went at `43150c24` (`TODO.md` §A.127), when `history` became `replace`. The
+  bullet above is the record as it stood.*
 - **`policy.levels`' ARRAY ORDER is an undeclared privilege lattice.** `grant-weigh.js` ranks a
   level by its index, so that array is what says `read < write < admin`, and nothing validates it
   against anything. Reordering it to `["admin","read","write"]` does not reorder a list — it makes

@@ -384,8 +384,9 @@ export function otlpTraceRequest(spans: readonly Span[], options: OtlpTraceReque
     // not a trace id, and shipping it produces a 200 followed by nothing being visible — the
     // failure mode this whole file's header opens with.
     // A NAMELESS SPAN TAKES THE SAME EXIT AS A BAD ID, and it used to acquire a fallback name
-    // instead. That fallback was `"loom.span"` — a NINTH span name, minted in this file, when the
-    // taxonomy is nine names owned by `telemetry/spans.ts` and §D.2 answered "no ninth name".
+    // instead. That fallback was `"loom.span"` — a span name minted in this file, outside the
+    // closed taxonomy `telemetry/spans.ts` owns (nine names then; ten since `744e6f8f` added
+    // `loom.compile`, one of §C.1's designed names), where §D.2 answered "no ninth name".
     // `registries.test.ts`'s "ONE FILE OWNS THE TELEMETRY VOCABULARY" caught it, which is what
     // that guard is for: a vocabulary with two representations drifts, and the second
     // representation here would have been invisible to everyone reading `spans.ts`.

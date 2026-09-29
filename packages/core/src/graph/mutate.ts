@@ -261,9 +261,12 @@ export function compileMutation(input: MutateInput): MutationResult {
     // the control's `["fn"]`.
     //
     // So the set is read off the MECHANISM rather than off the node types. Two functions decide
-    // whether a barrier is satisfied — `#maybeFireJoin`, which counts arrivals, and
-    // `#fireEmptyJoin`, which needs none — and both reach the join through an OUTBOUND `join`
-    // edge. A node that has one is a node whose readiness reports to a barrier, and an added
+    // whether a barrier is satisfied — `#releaseSettledBarriers`, which counts arrivals (a
+    // declared member, which a compiled graph connects by its OUTBOUND `join` edge, or a
+    // committed `take` naming an ordinary edge into the join node), and `#fireEmptyJoin`, which
+    // needs none and walks the empty fan's OUTBOUND `join` edges (`#maybeFireJoin`, the
+    // commit-time asker this sentence first named, was deleted by §A.101). A node that has an
+    // outbound `join` edge is a node whose readiness reports to a barrier, and an added
     // edge into it can move that barrier without executing what stood in front of it. That is
     // the property, and it is why enumerating node types would be defeated a fifth time.
     const reportsToBarrier = new Set(spec.edges.filter((x) => x.kind === "join").map((x) => x.from));

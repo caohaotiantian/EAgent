@@ -23,7 +23,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
 | `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it. It printed **three warnings that were wrong about their cause and right about a hazard** on every command until §A.84 closed; it compiles SILENT now, and §9 keeps the paragraph because the hazards are still real |
-| `graphs/grant-access.json` | 10 | **no**, and it means something offline — the ceremony is read off the resource's tier, the level and the hours. The only graph here with a `router` or a `kind: "error"` edge, and the only one using a reducer other than `replace`/`append_ordered`. It compiles with **no diagnostic at all**, and it reaches three different endings on three different inputs: see §10 |
+| `graphs/grant-access.json` | 10 | **no**, and it means something offline — the ceremony is read off the resource's tier, the level and the hours. The only graph here with a `router` or a `kind: "error"` edge. It compiles with **no diagnostic at all**, and it reaches three different endings on three different inputs: see §10 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
 directory, so a graph added later is covered without editing the test — and RUNS the three it can
@@ -375,8 +375,10 @@ missing from a document a person is about to approve, with nothing saying so.
   from a green suite.
 - **More shards than the fan-out's `maxWidth`** would silently CLAMP: 30 shards at a width of 24
   runs 24 branches and says nothing about the other six.
-- **A truncated listing.** `fs.glob` caps at 100 paths and says so in a final `… ` line; triaging
-  the 100 and dropping the marker is the clamp one layer up, and the width check cannot see it.
+- **A truncated listing.** `fs.glob` caps at 100 paths and says so as `truncated: true` on `scan`'s
+  reserved projection, `"scan:error"`, which `plan` reads (the listing itself carries no marker line
+  since `TODO.md` §A.105); triaging the 100 as if they were all is the clamp one layer up, and the
+  width check cannot see it. A `plan` handed no projection refuses rather than guess "complete".
 - **No readable fan-out width**, which is the fail-closed arm of the read below.
 
 Each returns `{refuse: {reason}}`, so the run fails as `validation`/`E_FUNCTION_REFUSED` — the class
@@ -587,8 +589,9 @@ loom replay  <runId>       # {"match": true, "hermetic": true}
 ```
 
 **This is the only graph here with a `router` in it, and the only one with a `kind: "error"` edge.**
-It is also the only one that uses a reducer other than `replace` and `append_ordered` — six of the
-eight ship unexercised, and it uses `merge_object` because the compiler makes it, not by choice.
+It USED to be the only one with a reducer other than `replace` and `append_ordered` — `merge_object`,
+which the compiler forced on it — and since `TODO.md` §A.127 it ships `replace` like the rest, so
+no example here exercises any of the other six reducers.
 
 **The router has TWO `cases[]` and one `fallbackEdge`**, which is three destinations and not three
 cases — a distinction that matters when you write one, because a case you forget falls through to
@@ -628,10 +631,9 @@ nothing today and is left alone.
 
 - **`GRAPH010_CONCURRENT_WRITE` USED TO refuse the obvious error-handling shape.** `prior` and
   `first-grant` are the `seq` and `error` targets of one node and no run can take both, and since
-  `TODO.md` §A.94 the compiler knows it: with `history: replace` the graph compiles clean. The
-  shipped file still says `merge_object`, the workaround from before, and its `residue-error-arm`
-  label still describes the refusal — both now out of date (§A.127). F1 of
-  `docs/workflow-port-2026-09-22b.md`.
+  `TODO.md` §A.94 the compiler knows it, and since §A.127 the shipped file says `history: replace`:
+  the `merge_object` workaround and the `residue-error-arm` label that described the refusal are
+  both gone. F1 of `docs/workflow-port-2026-09-22b.md`.
 - **A failed run's already-landed `fs.write` is rolled back automatically, with no `compensation`
   edge anywhere in the graph.** `fs.write` declares `compensation: {tool: "fs.restore"}`, so when
   `write-ledger` fails after `write-grant` succeeded the engine undoes the grant write and

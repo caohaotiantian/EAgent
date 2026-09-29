@@ -4172,8 +4172,9 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     }
     // THE DEPTH THAT DECIDES WHICH INSTANCE OF THIS BARRIER A BRANCH BELONGS TO.
     //
-    // `#maybeFireJoin` truncates an arriving branch coordinate to the join's compiled
-    // fan-out depth to name the instance, and `#foldJoin` reads the same number to decide
+    // `#releaseSettledBarriers` (which replaced `#maybeFireJoin`, §A.101) truncates an arriving
+    // branch coordinate to the join's compiled fan-out depth to name the instance, and
+    // `#foldJoin` reads the same number to decide
     // whether to HOLD its fold or apply it. Both were written against this rule and the
     // rule did not exist: when the depth is ambiguous the runtime silently falls back to
     // "one level up from whoever arrived", which is the pre-fix expression — so two arms
@@ -4433,7 +4434,7 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   // and every non-idempotent reducer — `append_ordered`, `sum` — doubles in silence.
   //
   // THE "WHICHEVER FAN-OUT" HALF IS THE ONE THE TWO SENTENCES ABOVE DO NOT PROVE, and its
-  // mechanism is one line over in `#maybeFireJoin`: the instance of the barrier an arrival belongs
+  // mechanism is in `#releaseSettledBarriers` (`#maybeFireJoin` until §A.101): the instance of the barrier an arrival belongs
   // to is `segments.slice(0, depth)` of the ARRIVING task's own coordinate, where `depth` is the
   // JOIN's compiled `fanoutDepth`. So a cross-fan arm does not fail to find its barrier — the
   // barrier is MINTED in the arriving arm's own fan, at the join's depth, and `#foldJoin` then
@@ -5496,10 +5497,11 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   // appears, or one of these learns to CREATE a join Task some other way, this clause is false
   // again and the exemption has to go back to refusing.
   //
-  // WHAT THE FOURTH ENTRANCE LOOKED LIKE. `#activate`'s generic arm mints, for a `seq` or
+  // WHAT THE FOURTH ENTRANCE LOOKED LIKE. `#activate`'s generic arm minted, for a `seq` or
   // `conditional` edge into the join node at the ROOT coordinate, the SAME TaskId
-  // `#maybeFireJoin` would — with no quiescence, membership or mode test — and `#maybeFireJoin`
-  // then stands down because `p.tasks[joinTaskId] !== undefined`. Nothing refused a
+  // `#maybeFireJoin` (the commit-time asker §A.101 deleted) would — with no quiescence,
+  // membership or mode test — and `#maybeFireJoin` then stood down because
+  // `p.tasks[joinTaskId] !== undefined`. Nothing refused a
   // non-`join`-kind edge into a join node: `GRAPH008_BRANCH_NOT_CONNECTED` matches on `e.from`
   // only and a `seq` edge satisfies it. Measured, on this file's own accept-case graph plus one
   // node (`seed -seq-> d0`, `d0 -seq-> gather`) and one extra hop in the branch:
@@ -5522,8 +5524,9 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   //   an error-path reader in branch 1 read branch 0's value.
   //
   //   MEMBERSHIP. Quiescence under `mode: "all"` is computed ENTIRELY from `join.branches` —
-  //   `#maybeFireJoin` builds `members` from it and both `stillLive` and `continuesInBranch` ask
-  //   `reachesMember` — so a branch node the join does not declare never holds the barrier.
+  //   `#releaseSettledBarriers` builds `members` from it and its liveness test asks `reaches` (a
+  //   declared member, or an ancestor of one), and `#joinArrivals`' `continuesInBranch` asks
+  //   `members.has` — so a branch node the join does not declare never holds the barrier.
   //   Measured on `read --error--> h0 --> h1 --> handler`: branch `b`'s handler read branch
   //   `c`'s value. This is now the "one edge per member" half: an undeclared branch node's edge
   //   into the join has a `from` that is not a member, and a member with no edge is
