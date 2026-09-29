@@ -64,6 +64,14 @@ function functions(): FunctionRegistry {
     const ok = (v.get<string[]>("picked") ?? []).every((x) => items(v).includes(x));
     return { writes: { verdict: { pass: ok, confidence: 1 } } };
   });
+  // A grader that spot-checks ONE item, chosen by its seed — so what it checks depends on `ctx`.
+  f.register("function/spot@stable", (v, ctx) => {
+    const it = items(v);
+    const i = Number((ctx as { seed?: number }).seed ?? 0) % Math.max(1, it.length);
+    const got = v.get<string[]>("picked") ?? [];
+    return { writes: { verdict: { pass: got.includes(it[i]!) && got.every((x) => it.includes(x)), confidence: 1 } } };
+  });
+  f.register("function/pick-count@stable", (v) => ({ writes: { picked: items(v).slice(1), rounds: (v.get<number>("rounds") ?? 0) + 1 } }));
   f.register("function/check-rigged@stable", () => ({ writes: { verdict: { pass: true, confidence: 1 } } }));
   f.register("function/order@stable", (v) => ({
     writes: { order: { pass: JSON.stringify(v.get("picked") ?? []) === JSON.stringify(items(v)), confidence: 1 } },
@@ -520,6 +528,29 @@ test("A GRADER THAT RAN TWICE certifies nothing — a loop back into it, its own
   // `rounds` differs too (2 against 1) and no grader reads it, so it keeps its byte pin; what is
   // asserted is the reason on `picked`, which `check` read twice.
   for (const c of r.cand.cases) assert.ok(c.reasons.some((x) => /node:check ran as 2 Tasks/.test(x)), `${c.id}: ${JSON.stringify(c.reasons)}`);
+});
+
+test("A GRADER REACHED ONLY AT ITERATION 1 certifies nothing — its task id and seed are not the recording's", async () => {
+  const b = bench();
+  const baseline = b.compile(keep({ check: "function/spot@stable" }));
+  const runs = await record(b, baseline);
+  // `pick` loops into itself once and only then reaches `check`, so the grader's one Task is
+  // `check@root#1`. The candidate drops item 0; the spot-check's seed (derived from the key, since the
+  // recording's is keyed on #0) samples another item. Lane F's re-review, as a pin.
+  const gamed = keep({
+    check: "function/spot@stable",
+    pick: "function/pick-count@stable",
+    pickReads: ["items", "rounds"],
+    pickWrites: ["picked", "rounds"],
+    channels: { rounds: { type: "number", reduce: "replace" } },
+    edges: [{ id: "again", from: "pick", to: "pick", kind: "loop", until: "rounds >= 2", maxIterations: 2 }],
+  }) as unknown as { edges: Record<string, unknown>[] };
+  gamed.edges[0] = { id: "e", from: "pick", to: "check", kind: "conditional", when: "rounds >= 2" };
+  const r = await drive(b, freeze(baseline, runs), baseline, b.compile(gamed as unknown as GraphSpec));
+  for (const c of r.cand.cases) {
+    assert.ok(c.reasons.some((x) => /node:check ran at iteration 1, so its task id, seed and clock are not the ones the recording served/.test(x)), `${c.id}: ${JSON.stringify(c.reasons)}`);
+    assert.equal(c.certified, undefined, c.id);
+  }
 });
 
 test("A VERDICT BELOW THRESHOLD, NO VERDICT AT ALL, OR ONE THAT LEFT THE JOURNAL, certifies nothing", async () => {

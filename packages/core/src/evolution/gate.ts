@@ -439,7 +439,8 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  *      evaluator at that id has the frozen identity — kind, ref, a resolved digest (required),
  *      `reads`, `threshold` — and the frozen SITE (`graderSite`: its whole `NodeSpec`, every edge
  *      leaving it, which is what its `ctx.node` is built from, and the `ChannelSpec` of every channel
- *      it reads, which with the fold's state is what its view is built from). It ran as exactly one Task. No gate
+ *      it reads, which with the fold's state is what its view is built from). It ran as exactly one Task,
+ *      at iteration 0 — its `ctx.taskId`, and the seed and clock keyed on it, are the recording's. No gate
  *      was raised on it and no hook changed it (a gate decided with `edit` and
  *      a `preNode` skip both commit `succeeded` with writes no body produced), and the graph did not
  *      mutate before it committed. Its OWN commit — never the final `verdict` channel, which a later
@@ -460,11 +461,6 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * candidate whose `channel` differs changes the request, so `reboundEffects` names it and the case
  * fails on that reason whatever this returns. A guard nothing can distinguish is not added. Nor is
  * the commit's `status`: a commit that did not succeed carries no verdict, which condition 1 reads.
- * Nor the Task's ITERATION — residue, named: a grader whose one Task is reached only at iteration
- * > 0 draws its PRNG seed from the key rather than from the recording (`ReplayReport.derivedSeeds`
- * names it, and `13-replay-verified` prints the count), so a grader whose verdict depends on
- * `Math.random` is judged on a sample the recording never drew. No shipped grader draws; no test
- * here could tell the condition's absence from its presence.
  *
  * WHAT IT CERTIFIES IS EXACTLY WHAT THE GRADER CHECKS. A grader that asserts only a length
  * certifies any value of that length; its strength is the operator's, who named it at freeze —
@@ -499,6 +495,15 @@ function certification(
     const tasks = Object.values(report.replayed.tasks).filter((t) => String(t.nodeId) === nodeId);
     if (tasks.length !== 1) return no(`${scope} ran as ${String(tasks.length)} Tasks, so what it graded has more than one answer`);
     const task = tasks[0]!;
+    // THE ITERATION IS PART OF WHAT THE BODY IS HANDED. `ctx.taskId` carries it, and the recorded
+    // seed and clock are keyed on the TaskId; a candidate that reaches the grader only at iteration
+    // 1 hands it a seed derived from the key instead. Lane F's re-review drove a grader that
+    // spot-checks one seed-chosen item to certify a candidate that dropped another — refused then
+    // only because the recording's unasked-for seed tripped `unexercised`, a guard this one should
+    // not lean on without naming it. So it does not lean on it.
+    if (task.iteration !== 0) {
+      return no(`${scope} ran at iteration ${String(task.iteration)}, so its task id, seed and clock are not the ones the recording served`);
+    }
     const served = servedTo(report.replayedEvents, task.taskId, now.reads, specs);
     if (!served.decidable) return no(`what ${scope} was served is undecidable: ${served.reason}`);
     const intervened = report.replayedEvents.find(
