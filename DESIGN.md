@@ -442,7 +442,7 @@ admitting it turns the rule into a counterexample generator.
 | 21 | A.36 | **done `d9a8173`** — a child run was LISTED by `GET /runs` and 404'd on every by-id route; a child id always contains a `#` |
 | 22 | B.1 | **reclassified, not work** — `TODO.md` §B.1: `LeasedScheduler` is a pinned public type a library embedder already reaches, so "wire it or delete it" is a false dichotomy |
 | 23 | A.13 | **done `96a03bf`** — `loom run` counted its own laps instead of the run's progress |
-| 24 | A.29 | **open, and three mechanisms have been REFUSED** — a frozen golden case pins the whole work channel verbatim. Each refusal is the same shape: the candidate owns both sides of any channel its graph produces. `TODO.md` §A.29. **RE-SEQUENCED 2026-09-22b, keeping its number rather than being reopened as a new item.** The FACT that moved: "a second input shape for the self-improvement corpus" was deferred below on the cost of a second port, and ports 2 and 3 have since happened, so the shapes exist and what is left is live spend against them. The 2026-09-22b assessment's judgement — not a measurement — is that this makes the money decision smaller. **What closes it is the behaviour §A.29's title names** — a candidate the graph's OWN verifier certifies, refused by `1-must-pass` and reported as a 33.3pp regression, must stop being refused. **That behaviour is NOT currently reproduced by a command:** §A.29 carries only a grep the row itself disowns (it counts prose about a deletion), so producing a repro for the refusal is the item's own first task. Closing it needs a fold that can answer *"what did channel C hold when task T read it"*, a per-task ordering `RunProjection` does not carry — **or** property 3's claim re-scoped to what the exam actually establishes, with `CLAUDE.md` §3's five assumptions rewritten to match. This item and item 18 are the only OPEN items in 1–28; 8 and 13 are HALF, and their remainders are real — D5's version pin, and `TODO.md` §E.2's coordinator. **2026-09-24: the first task is DONE — the refusal is REPRODUCED** at `0558c2a5` (merged `7f576a47`): `node --test packages/core/test/evolution/a29-verifier-certified-refused.test.ts` → 2 pass, a green-is-wrong pin in which a candidate its own verifier certifies 30/30 (baseline 10/30) is refused `1-must-pass` + `2-non-inferior` at *"66.7% vs baseline 100.0% (Δ -33.3pp)"*, every failure `channel "picked" differs` on the ten goldens, and a control that genuinely drops items (verifier 0/30) gets the identical verdict. **Still OPEN, and now the only open item in 1–28** (item 18 closed): which closure — the fold or the re-scope — is the maintainer's Q6 |
+| 24 | A.29 | **open, and three mechanisms have been REFUSED** — a frozen golden case pins the whole work channel verbatim. Each refusal is the same shape: the candidate owns both sides of any channel its graph produces. `TODO.md` §A.29. **RE-SEQUENCED 2026-09-22b, keeping its number rather than being reopened as a new item.** The FACT that moved: "a second input shape for the self-improvement corpus" was deferred below on the cost of a second port, and ports 2 and 3 have since happened, so the shapes exist and what is left is live spend against them. The 2026-09-22b assessment's judgement — not a measurement — is that this makes the money decision smaller. **What closes it is the behaviour §A.29's title names** — a candidate the graph's OWN verifier certifies, refused by `1-must-pass` and reported as a 33.3pp regression, must stop being refused. **That behaviour is NOT currently reproduced by a command:** §A.29 carries only a grep the row itself disowns (it counts prose about a deletion), so producing a repro for the refusal is the item's own first task. Closing it needs a fold that can answer *"what did channel C hold when task T read it"*, a per-task ordering `RunProjection` does not carry — **or** property 3's claim re-scoped to what the exam actually establishes, with `CLAUDE.md` §3's five assumptions rewritten to match. This item and item 18 are the only OPEN items in 1–28; 8 and 13 are HALF, and their remainders are real — D5's version pin, and `TODO.md` §E.2's coordinator. **2026-09-24: the first task is DONE — the refusal is REPRODUCED** at `0558c2a5` (merged `7f576a47`): `node --test packages/core/test/evolution/a29-verifier-certified-refused.test.ts` → 2 pass, a green-is-wrong pin in which a candidate its own verifier certifies 30/30 (baseline 10/30) is refused `1-must-pass` + `2-non-inferior` at *"66.7% vs baseline 100.0% (Δ -33.3pp)"*, every failure `channel "picked" differs` on the ten goldens, and a control that genuinely drops items (verifier 0/30) gets the identical verdict. **Still OPEN, and now the only open item in 1–28** (item 18 closed): which closure — the fold or the re-scope — is the maintainer's Q6. **2026-09-29: DONE by the FOLD** (Q6, the maintainer's) at `36f6d065` … `0fd272aa` with the seam `be7aef7c` (merged `8a6c2eba`). `run/served.ts` folds the replay's shadow journal through a task's last lease and answers what each frozen grader was SERVED; a golden case's differing pinned channel passes only on the certificate of every frozen grader reading it. The same pin now shows the closure: → 2 pass, the certified candidate PROMOTED (30/30) and the control still refused at Δ -33.3pp. Games A, A′, C, G refused (`a29-served-certificate.test.ts`, 20). `TODO.md` §A.29 is struck; residue §A.137–§A.139 |
 | 25 | D.1 | **done** — `readMcpServers` silently dropped every key it did not know, so a per-server `irreversibility` vanished. `TODO.md` §D.1 |
 | 26 | H.4 | **done `96a03bf`** — three flags accepted and ignored on a verb reading none of them |
 | 27 | H.3 | **done `e8c2fb5`** |
@@ -475,7 +475,9 @@ so a gate decision on it never checks the resources behind its refs) **and 24** 
 half**, 8's version pin and 13's second half, **22 was reclassified**, and the other **twenty-three
 are done**. Re-derive it from the three tables above, never from this sentence. No item had been
 opened since 2026-09-02, when items 15–28 were. *(2026-09-24: 18 is done at `4fe87a88`, so ONE is
-open — 24 — two half, one reclassified, twenty-four done.)*
+open — 24 — two half, one reclassified, twenty-four done.)* *(2026-09-29: 24 is done too, by the
+fold, so NONE of 1–28 is open: 8 and 13 half, 22 reclassified, twenty-five done. A lane report said
+"18 is the only one still open" — 18 closed on 2026-09-23; re-derived from the tables above.)*
 
 **What that leaves is not code.** Three workflows are ported with zero changes under
 `packages/core/src`; `npm run check` is green (the handoff's §1 carries the wave's counts, which
@@ -653,6 +655,10 @@ surface over a plane that is not emitting is a better view of nothing.
 *(2026-09-24: untouched, and next after §A.101. Its first slice as planned — `durationMs` on
 `run.compiled` and the node type on `task.leased` — rests on Q7, "the order only, not the whole
 owed list", which was recommended and has not been put to the maintainer.)*
+*(2026-09-29: Q7 ANSWERED — the order only — and the first slice ran as Lane L: §C.1's
+`loom.compile` span and §C.2's `node.type`, which is ONE of §C.2's eight underivable attributes,
+not two — the 2026-09-24 handoff's §7 said "the first two", and that was false. **In flight at
+settlement time; the result, shas and the repro's new counts are pending the lane's merge.**)*
 
 **The owed decisions are NOT an item, and that is the rule working rather than an omission.** A
 decision cannot name a command that fails, so it gets cut rather than reworded — but the SITTING is
@@ -665,6 +671,10 @@ questions; the table is the one to answer from.** Decided by the maintainer this
 **Q3 = (a)** (D9's flag 2 / §A.99, `fs.restore` undoes a create), **Q11** (§A.77, refuse), **Q12**
 (§A.86, a written argument) and **N7** (`loom --help --tokne x` refuses, reversing `ad83204d`).
 **Still owed, and not put to him this wave: Q4–Q10 and Q13–Q20.** Struck below where answered.
+**2026-09-29: three more ANSWERED** — **Q6** (item 24 closes by the fold; built), **Q7** (item 31's
+first slice goes on its own, the order only; running) and **§A.111** (no journal compatibility
+before 0.1.0; written above `replay.ts` `compare`). **Still owed: Q4, Q5, Q8–Q10 and Q13–Q20**, the
+table in `docs/handoff-2026-09-23.md` §7, plus the flags in `docs/handoff-2026-09-29.md` §5.
 
 - ~~**§A.77** — whether `validate.ts` should refuse `k > branches.length` for a barrier whose every
   member is static and unfanned. No lane has taken it.~~ Q11: refuse — `1e37ca87`.
@@ -719,6 +729,16 @@ second arrival, which the compiler assumes cannot happen outside §A.94's and §
 own contract outranks new vocabulary. **(2) Item 31's first slice**, on Q7. **(3) Item 24's fold**,
 once Q6 is answered — or the re-scope instead. **(4) The fourth port**, after the publish. The four
 owed into a fifth wave (§A.71, `TODO.md` §D.8, §A.70, §A.72) are now owed into a SIXTH.
+*Where it stands, 2026-09-29:* the six `wave-0929-*` lanes merged (`393a48f0` … `d5e4f32a`). §A.101
+is CLOSED — a Task runs once, and every join releases from ONE asker between waves; **24 is DONE**,
+by the fold; §A.102 closed replay's half of 18's binding. Item 31's first slice (Lane L) was in
+flight. The publish is still the maintainer's act alone. The next wave's order: **(1) `TODO.md`
+§A.140**, with §A.141 — a join whose member feeds another member (or a static join inside a loop)
+never releases and the run reports `succeeded`: pre-existing, and the fail-open class, which is why
+it outranks everything below. **(2) The other engine rows** §A.101's review left: §A.142, §A.143
+(width-dependent side effects — fail-fast is a policy decision first), §A.108, §A.134. **(3) Item
+31's remainder**, name by name, after Lane L merges. **(4) The fourth port**, after the publish. The
+four owed into a sixth wave (§A.71, `TODO.md` §D.8, §A.70, §A.72) are owed into a SEVENTH.
 
 **The ORDER inside item 30, decided with D8 on 2026-09-22** — the two decisions above are the first
 two units of work, in this sequence and not in parallel:
@@ -736,7 +756,7 @@ two units of work, in this sequence and not in parallel:
    assertions rather than re-testing the engine. **Landed 2026-09-23** — D9's *Enforced* line.
 4. **Only then** items 29, 18/24, and 31. *(2026-09-23: 29 is built short of its publish; 18/24
    and 31 are untouched.)* *(2026-09-24: 18 done, 24 reproduced, 29 unblocked for the publish, 31
-   untouched.)*
+   untouched.)* *(2026-09-29: 24 done; 31's first slice in flight; 29 waits on the publish.)*
 
 **And the do-not-do-in-parallel list, which is part of the decision rather than advice:** do not
 split D.10 back into three rows fixed a little each; do not add only a per-run ledger for §A.90 and
