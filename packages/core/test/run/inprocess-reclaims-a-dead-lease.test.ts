@@ -74,7 +74,7 @@ async function strandedRun(node: NodeId, task: TaskId, holder: string): Promise<
       actor: SYSTEM_ACTOR("scheduler"),
       taskId: task,
     },
-    { type: "task.leased", payload: { workerId: holder, attempt: 1 }, actor: SYSTEM_ACTOR("scheduler"), taskId: task },
+    { type: "task.leased", payload: { workerId: holder, attempt: 1, nodeType: node === AGENT ? "agent" : "join" }, actor: SYSTEM_ACTOR("scheduler"), taskId: task },
   ];
   await log.append(seed);
   const events = [];
@@ -156,7 +156,7 @@ test("...and never takes back a lease THIS scheduler object handed out", async (
   assert.deepEqual(ask(s, { graph, projection: await fold(), nodes }, LEASED_AT, "worker-0"), [AGENT_TASK]);
   // … and the lease the executor then writes for it.
   await log.append([
-    { type: "task.leased", payload: { workerId: "worker-0", attempt: 1 }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+    { type: "task.leased", payload: { workerId: "worker-0", attempt: 1, nodeType: "agent" }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
   ]);
   const leased = { graph, projection: await fold(), nodes };
   assert.deepEqual(
@@ -177,7 +177,7 @@ test("...and never takes back a lease THIS scheduler object handed out", async (
   assert.deepEqual(ask(s, { graph, projection: await fold(), nodes }, LEASED_AT + 2, "worker-0"), [], "committed, so nothing to run");
   await log.append([
     { type: "task.ready", payload: { nodeId: AGENT, branchPath: encodeBranch(branch), edgesIn: ["e0"] }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
-    { type: "task.leased", payload: { workerId: "worker-0", attempt: 2 }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+    { type: "task.leased", payload: { workerId: "worker-0", attempt: 2, nodeType: "agent" }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
   ]);
   assert.deepEqual(
     ask(s, { graph, projection: await fold(), nodes }, LEASED_AT + 60_002, "worker-0"),
@@ -320,7 +320,7 @@ test("the engine consults `select` on a stranded run, and the reclaimed task is 
       actor: SYSTEM_ACTOR("scheduler"),
       taskId: AGENT_TASK,
     },
-    { type: "task.leased", payload: { workerId: "worker-0", attempt: 1 }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+    { type: "task.leased", payload: { workerId: "worker-0", attempt: 1, nodeType: "agent" }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
   ]);
 
   const spy = new SpyScheduler();
