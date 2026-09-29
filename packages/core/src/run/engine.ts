@@ -309,9 +309,10 @@ export interface SubmitInput {
    * graph compiled once and submitted many times passes nothing, and that absence is the
    * truthful "not measured", not a zero.
    *
-   * A value that is not a finite, non-negative number is DROPPED rather than refused: it is a
+   * A value that is not a finite, non-negative number, or that exceeds the engine clock itself (an
+   * absolute reading passed where a difference belongs), is DROPPED rather than refused: it is a
    * telemetry fact no decision reads, and a bad clock reading must neither fail a run nor put a
-   * negative-width span on its trace.
+   * span on its trace that starts before the epoch.
    */
   readonly compileDurationMs?: number;
 }
@@ -3252,13 +3253,17 @@ export class Engine {
           // every `PolicyRequest` reads as `declaredPosture` was reconstructible from nothing —
           // and the compensating check compared the run-wide `max`, which a single node's drop
           // does not move while any other node holds it. Sorted so two compiles of one spec
-          // journal the identical row.
+          // journal an identical `postures` (the row as a whole can differ in `durationMs`).
           postures: compiledPostures(input.graph),
           // THE CALLER'S MEASUREMENT, OR NOTHING — see `SubmitInput.compileDurationMs`. This row,
           // `run.submitted`, `run.started` and the entry `task.ready`s share one append and one
           // `ts`, so the compile ENDED at or before that instant; `spansFrom` draws it as
-          // `[ts − durationMs, ts]` and draws nothing when the field is absent.
-          ...(typeof input.compileDurationMs === "number" && Number.isFinite(input.compileDurationMs) && input.compileDurationMs >= 0
+          // `[ts − durationMs, ts]` and draws nothing when the field is absent. The two bounds are
+          // the whole test — NaN fails the first, either infinity one of them — and the upper one
+          // drops an absolute clock reading passed where a difference belongs.
+          ...(typeof input.compileDurationMs === "number" &&
+            input.compileDurationMs >= 0 &&
+            input.compileDurationMs <= this.#now()
             ? { durationMs: input.compileDurationMs }
             : {}),
         },

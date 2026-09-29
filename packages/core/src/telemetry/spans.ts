@@ -575,20 +575,25 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // `loom.compile` — THE ONE SPAN IN THIS FILE THAT ENDS WHERE ITS PARENT BEGINS.
       //
       // `run.submitted`, `run.compiled`, `run.started` and the entry `task.ready`s are ONE
-      // append with ONE `ts`, and the compile ran in the CALLER before that append — so the only
-      // interval the journal can honestly claim is `[ts − durationMs, ts]`, which starts before
-      // `loom.run` does. It is still that run's child: the compile happened for this run and for
-      // nothing else, which is the condition under which a caller records `durationMs` at all.
-      // A reader drawing a waterfall sees it hang off the left edge of its parent, and that is
-      // the true picture rather than a rendering defect; `cli.ts`'s tree walk parents by id, not
-      // by position.
+      // append with ONE `ts`, and the compile ran in the CALLER before that append. So the WIDTH
+      // is measured and the POSITION is a bound: the compile ended AT OR BEFORE `ts`, by a gap
+      // nobody timed (the CLI's body checks and the submit's own work; a subgraph child's
+      // `subgraph.started` append). `[ts − durationMs, ts]` is the latest placement consistent
+      // with the journal, drawn there rather than at an instant the journal does not hold. It
+      // starts before `loom.run` does and is still that run's child: the compile happened for
+      // this run and for nothing else, which is the condition under which a caller records
+      // `durationMs` at all. `cli.ts`'s tree walk parents by id, not by position.
       //
       // ONLY WHEN MEASURED. Absent is "not measured" — a catalogue graph compiled once at boot, a
       // replay's shadow, a subgraph child served from the compile cache — and inventing a
       // zero-width compile there would be a measurement nobody took. Anything that is not a
-      // finite non-negative number is treated the same way, for a journal written by hand.
+      // finite non-negative number is treated the same way, for a journal written by hand, and
+      // so is one LARGER than `ts` — an absolute clock reading passed where a difference belongs,
+      // which would put the span's start before the epoch and an OTLP collector's at 0. The two
+      // bounds are the whole test: `ts` is finite by the read at the top of this loop, so NaN
+      // fails `>= 0` and either infinity fails one of them.
       const took: unknown = e.payload.durationMs;
-      if (typeof took === "number" && Number.isFinite(took) && took >= 0) {
+      if (typeof took === "number" && took >= 0 && took <= ts) {
         const id = spanId(runId, "compile", String(e.seq));
         start(id, { name: "loom.compile", kind: "internal", start: ts - took, parent: rootId, attributes: {}, links: [], events: [] });
         close(id, ts, "ok");

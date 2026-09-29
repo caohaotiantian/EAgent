@@ -117,7 +117,7 @@ const named = (spans: readonly Span[], name: string): Span[] => spans.filter((s)
 
 // ── loom.compile ────────────────────────────────────────────────────────────
 
-test("A MEASURED COMPILE IS [ts − durationMs, ts], A CHILD OF loom.run, ENDING WHERE THE RUN BEGINS", async () => {
+test("A MEASURED COMPILE IS [ts − durationMs, ts], A CHILD OF loom.run, DRAWN ENDING AT THE SUBMIT ts", async () => {
   const h = harness(() => T0);
   const runId = await h.engine.submit({ graph: compiled(chainSpec()), inputs: { amount: 21 }, compileDurationMs: 7 });
   assert.equal((await h.engine.advance(runId)).status, "succeeded");
@@ -131,14 +131,14 @@ test("A MEASURED COMPILE IS [ts − durationMs, ts], A CHILD OF loom.run, ENDING
   assert.equal(compiles.length, 1, "one compile, one span");
   const c = compiles[0]!;
   assert.equal(c.parentSpanId, run!.spanId, "the compile is the run's child");
-  assert.equal(c.endTime, run!.startTime, "run.submitted and run.compiled share one append and one ts — the compile ENDED there");
+  assert.equal(c.endTime, run!.startTime, "run.submitted and run.compiled share one append and one ts — the compile ended at or before it, and the span is drawn ending there");
   assert.equal(c.startTime, T0 - 7, "and began durationMs before it");
   assert.equal(c.status, "ok");
   assert.equal(c.traceId, run!.traceId);
 });
 
 test("ABSENT IS 'NOT MEASURED': no field, no span — and a value no clock can produce is dropped, not journaled", async () => {
-  for (const given of [undefined, Number.NaN, -1, Number.POSITIVE_INFINITY, "5" as unknown as number]) {
+  for (const given of [undefined, Number.NaN, -1, Number.POSITIVE_INFINITY, "5" as unknown as number, T0 + 1]) {
     const h = harness(() => T0);
     const runId = await h.engine.submit({
       graph: compiled(chainSpec()),
@@ -238,8 +238,10 @@ test("A JOURNAL WRITTEN BEFORE EITHER FIELD STILL TRACES — no node.type, no lo
   assert.equal(task!.attributes["task.attempt"], 1, "the lease's other attributes are still read");
 
   // And the shapes a hand-written journal can carry that no engine writes: every one is dropped
-  // rather than drawn, and none throws.
-  for (const [durationMs, nodeType] of [["7", 5], [-3, null], [Number.NaN, {}], [null, ["function"]]] as const) {
+  // rather than drawn, and none throws. `5_021` is one past `run.compiled`'s own ts (5_020) — an
+  // absolute clock reading where a difference belongs, whose span would start before the epoch.
+  // `Infinity` cannot survive JSON, so it reaches here only from an in-memory journal.
+  for (const [durationMs, nodeType] of [["7", 5], [-3, null], [Number.NaN, {}], [null, ["function"]], [Number.POSITIVE_INFINITY, true], [5_021, undefined]] as const) {
     const odd = old.map((e) =>
       e.type === "run.compiled"
         ? ev(2, "run.compiled", { ...(e.payload as object), durationMs }, null)
@@ -251,6 +253,9 @@ test("A JOURNAL WRITTEN BEFORE EITHER FIELD STILL TRACES — no node.type, no lo
     assert.deepEqual(named(s, "loom.compile"), [], `durationMs=${JSON.stringify(durationMs)} is not a measurement`);
     assert.equal("node.type" in named(s, "loom.task")[0]!.attributes, false, `nodeType=${JSON.stringify(nodeType)} is not a type`);
   }
+  // The boundary is inclusive: a compile exactly as long as `ts` is a measurement, starting at 0.
+  const edge = spansFrom(old.map((e) => (e.type === "run.compiled" ? ev(2, "run.compiled", { ...(e.payload as object), durationMs: 5_020 }, null) : e)));
+  assert.deepEqual(named(edge, "loom.compile").map((c) => [c.startTime, c.endTime]), [[0, 5_020]]);
 });
 
 // ── replay ──────────────────────────────────────────────────────────────────
