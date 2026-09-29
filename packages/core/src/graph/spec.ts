@@ -285,7 +285,7 @@ export interface JoinNode {
   readonly mode: "all" | "any" | "quorum" | "firstSuccess";
   /**
    * `quorum` only: `k <= 1` is a FRACTION of the branch width and `k > 1` an integer count —
-   * `#maybeFireJoin` computes `need = k <= 1 ? Math.ceil(k * expected) : k`, so `k: 1` asks for
+   * `quorumNeed` in `run/engine.ts` computes `need = k <= 1 ? Math.ceil(k * expected) : k`, so `k: 1` asks for
    * EVERY branch and not for one, which is this field's most confusable value.
    * It is a FLOOR and not only a short-circuit threshold: a quorum barrier released because no
    * further arrival is possible refuses with `E_QUORUM_UNREACHABLE` when FEWER THAN `need`
