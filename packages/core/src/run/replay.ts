@@ -1481,11 +1481,12 @@ function decisionOf(g: GateRecord): Parameters<Engine["resolveGate"]>[1]["decisi
  *
  * NO JOURNAL COMPATIBILITY BEFORE 0.1.0, and a pre-release journal that replays `match: false` is
  * not a defect this function owes an excuse for (`TODO.md` §A.111, decided by the maintainer
- * 2026-09-29). The recording is folded by THIS build's `foldRun`, so when the fold learns a fact —
- * `TaskRecord.readFacts` at `26a4f358`, or an agent's transcript carrying the in-band truncation note
- * at `a2f5244a` — a journal written before it folds to a different projection than its own run
- * held, and the comparison below says so. That is a TRUE statement about two builds, not a false
- * divergence: the older run really did proceed without the fact. Naming "a build boundary" instead
+ * 2026-09-29). The recording is folded and re-executed by THIS build, so when the build learns a
+ * fact — the fold's `TaskRecord.readFacts` at `26a4f358`, or the in-band truncation note `a2f5244a`
+ * puts in an agent's model REQUEST, which the recorded request digest then no longer matches — a
+ * journal written before it replays differently from how its own run went, and the comparison
+ * says so. That is a TRUE statement about two builds, not a false divergence: the older run really
+ * did proceed without the fact. Naming "a build boundary" instead
  * would need a durable build identity on every journal, which is new vocabulary in
  * `journal/events.ts` bought for journals that exist only inside this repository — the package is
  * `private: true` at 0.1.0 and has never been published (`DESIGN.md` item 29), so no operator
