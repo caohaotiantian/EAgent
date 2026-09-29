@@ -586,9 +586,11 @@ export interface ReplayReport {
    * the VERDICT, never the record. A caller that suppressed the frame can still see, and
    * journal, that it replayed a candidate.
    *
-   * `match` INCLUDES EVERY SUCCESSOR (§A.102): `recorded`/`replayed` are the SUBMITTED hashes, but
-   * a run that mutated ran under the graphs its `graph.mutated` rows adopted too, and `match` is
-   * false when any of those the replay did not reproduce — see `unboundSuccessors`.
+   * `match` INCLUDES THIS RUN'S SUCCESSORS (§A.102): `recorded`/`replayed` are the SUBMITTED
+   * hashes, but a run that mutated ran under the graphs its own `graph.mutated` rows adopted too,
+   * and `match` is false when any of those the replay did not reproduce — see `unboundSuccessors`.
+   * NOT a subgraph child's: a child is served as a `subgraph` effect, never re-run, so neither its
+   * `run.compiled` manifest nor its successors are bound here.
    */
   readonly graph: {
     readonly recorded: string;
@@ -671,8 +673,9 @@ function refKey(m: readonly { readonly ref: string; readonly digest: string }[])
 }
 
 /**
- * Every successor the recording adopted that the replay did not reproduce, as a `graph.bound`
- * frame body (§A.102).
+ * Every successor this run's own journal adopted that the replay did not reproduce, as a
+ * `graph.bound` frame body (§A.102). A subgraph child's successors are not read — see
+ * `ReplayReport.graph`.
  *
  * WHY THIS EXISTS: `refsBound` reads `run.compiled`'s manifest, which names the AUTHORED graph's
  * refs and nothing else. A ref a mutation INTRODUCED is resolved live when the mutation is adopted
@@ -682,7 +685,9 @@ function refKey(m: readonly { readonly ref: string; readonly digest: string }[])
  * `run.compiled`'s manifest stayed identical — and the replay reported `match: true`. Measured on
  * this build twice: a mutation-added `human_gate` whose oversight ref moved (engine-level), and a
  * journal written by the binary (`loom run --grant graph:mutate --extension-module`) whose
- * mutation-added `function/added.js` was then edited, replayed with the workspace's resolver.
+ * mutation-added `function/added.js` was then edited, replayed by a direct `replayRun` call
+ * handed the workspace's resolver — NOT by `loom replay`, which passes no resolver, so there a
+ * mutation-added published ref is unresolvable in the shadow whether or not it moved.
  *
  * COMPARED AGAINST THE SHADOW'S OWN `graph.mutated` ROWS, not against a re-resolution done here.
  * The shadow is an ordinary Engine, so its i-th row carries the manifest of the successor it
@@ -723,7 +728,9 @@ function unboundSuccessors(
       out.push({ taskId: a.proposedBy, expected: a.newHash, actual: "(successor not adopted)" });
       continue;
     }
-    if (a.resolutionManifest === undefined) {
+    // `Array.isArray`, not `=== undefined`: a row whose field is anything but a list is as
+    // uncomparable as one without it, and must say so rather than throw a TypeError.
+    if (!Array.isArray(a.resolutionManifest)) {
       out.push({
         taskId: a.proposedBy,
         expected: `${a.newHash} (no manifest recorded — the row predates graph.mutated.resolutionManifest)`,
@@ -735,13 +742,15 @@ function unboundSuccessors(
       out.push({ taskId: a.proposedBy, expected: a.newHash, actual: b.newHash });
       continue;
     }
+    const recordedRefs: readonly { ref: string; digest: string }[] = a.resolutionManifest;
     const replayedRefs = b.resolutionManifest ?? [];
-    if (refKey(a.resolutionManifest) === refKey(replayedRefs)) continue;
-    const drift = describeRefDrift(a.resolutionManifest, replayedRefs);
+    if (refKey(recordedRefs) === refKey(replayedRefs)) continue;
+    const drift = describeRefDrift(recordedRefs, replayedRefs);
+    // A difference `describeRefDrift` cannot name (a ref listed twice) still prints both sides.
     out.push({
       taskId: a.proposedBy,
-      expected: drift.map((r) => `${r.ref}=${short(r.was)}`).join(", "),
-      actual: drift.map((r) => `${r.ref}=${short(r.now)}`).join(", "),
+      expected: drift.length === 0 ? refKey(recordedRefs) : drift.map((r) => `${r.ref}=${short(r.was)}`).join(", "),
+      actual: drift.length === 0 ? refKey(replayedRefs) : drift.map((r) => `${r.ref}=${short(r.now)}`).join(", "),
     });
   }
   return out;
@@ -1031,7 +1040,11 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   }
   // One `graph.bound` frame per unbound successor, named by the task that proposed it. Suppressed
   // under `"allow"` exactly as the submitted graph's frame is — the same binding, one graph over.
-  if (opts.onGraphChange !== "allow") {
+  // And only when the SUBMITTED graph is bound: otherwise its frame above already fails `match`,
+  // and every successor differs from the recording as a consequence (its parent hash or the
+  // authored refs it carries), so a frame each would repeat that one difference. `graph.match`
+  // still counts them either way.
+  if (opts.onGraphChange !== "allow" && graphBound) {
     for (const s of successors) frames.push({ seq: seq++, kind: "graph.bound", match: false, ...s });
   }
   for (const r of rebound) {

@@ -737,8 +737,9 @@ test("A.102 — A RESOLVER THAT CANNOT READ THE ADDED REF REPORTS IT UNBOUND, no
   // The undecidable half: the replay's resolver has no answer for the ref the mutation added.
   // `compileMutation` does not refuse a `human_gate` whose oversight ref is unresolved — it drops
   // the ref from the successor's manifest — so the shadow ADOPTS a successor missing it. Before
-  // §A.102 this replayed `match: true`. (Not the CLI's shape: `loom replay` passes no resolver,
-  // and a mutation-added `function` ref then fails the shadow's compile, GRAPH015, moved or not.)
+  // §A.102 this replayed `match: true`. It is also what `loom replay` does today to any added ref
+  // the recording resolved, because the CLI passes `replayRun` no resolver: an oversight ref is
+  // dropped this way, and a mutation-added `function` ref fails the shadow's compile (GRAPH015).
   const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting() });
   const runId = await recordMutated(r);
   const blind: ResourceResolver = {
@@ -883,4 +884,24 @@ test("A.102 — THE PAIRING'S OTHER ARMS: a successor on one side only, or a dif
   const other = `sha256:${"f".repeat(64)}`;
   const renamed = await replayWith({ store: await agedCopy(r.store, runId, (p) => ({ ...p, newHash: other })), resolver: r.res.resolver }, runId);
   assert.deepEqual(ends(renamed), [[other, row!.payload.newHash]]);
+
+  // A ROW WHOSE MANIFEST IS NOT A LIST is as uncomparable as one without it — a frame, not a TypeError.
+  const garbled = await replayWith({ store: await agedCopy(r.store, runId, (p) => ({ ...p, resolutionManifest: null })), resolver: r.res.resolver }, runId);
+  assert.equal(garbled.graph.match, false);
+  assert.match(String(ends(garbled)[0]?.[0]), /no manifest recorded/);
+});
+
+test("A.102 — AN AUTHORED REF THAT MOVED IS ONE FRAME, not one per successor carrying it", async () => {
+  // The successor's manifest holds the authored refs too, so a moved `prompt/p` differs in both. The
+  // submitted graph's frame already fails `match`; `graph.match` still counts the successor.
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting((ref) => ref.startsWith("prompt/p@")) });
+  const runId = await recordMutated(r);
+  r.res.bump();
+  const report = await replayWith({ store: r.store, resolver: r.res.resolver }, runId);
+  assert.equal(report.match, false);
+  assert.equal(report.graph.match, false);
+  const frames = boundFrames(report) as { taskId?: string; expected?: string }[];
+  assert.equal(frames.length, 1, JSON.stringify(frames));
+  assert.equal(frames[0]!.taskId, undefined, "the submitted graph's frame, not a successor's");
+  assert.match(frames[0]!.expected ?? "", /^prompt\/p@stable=/);
 });
