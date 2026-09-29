@@ -20,8 +20,12 @@
  * WHY THE LEASE IS THE CUT. `Engine.#runWaveInner` appends every `task.leased` of a wave, then
  * takes ONE projection, then runs the bodies against it, then commits in branch order. A lease
  * changes no channel, binding or externalised-handle map, so the fold at T's own lease equals the
- * projection the wave's bodies were handed; a wave-mate's write lands at its commit, after every
- * body in the wave ran, and is correctly absent. That is an argument about the engine, so it is
+ * projection the wave's bodies were handed in everything a CHANNEL read sees; a wave-mate's write
+ * lands at its commit, after every body in the wave ran, and is correctly absent. A lease DOES change
+ * `tasks`, which a reserved `"<id>:error"` read is projected from: a wave-mate leased later in the
+ * same wave out of `succeeded`/`failed` (§A.101's re-run) projects differently at T's lease than in
+ * the wave's snapshot. So an `:error` read's answer here is exact only when no wave-mate was re-run;
+ * `evolution/gate.ts` never certifies on one (it is not a recorded input). That is an argument about the engine, so it is
  * proven by running rather than by reading: `test/run/served.test.ts` has bodies echo their view
  * over multi-node waves, an externalised payload, a retry, an lww envelope and a reserved error
  * projection, and compares each echo with this. The argument holds for ONE writer per journal,
@@ -237,8 +241,18 @@ export function evaluatorIdentities(graph: RunGraph): Record<
  * engine reads for this node: its `policy` (a gate), `retry` (which attempt's clock it reads),
  * `timeoutMs`, and the `writes` that confine a hook's override.
  *
- * THE COST, named: a candidate that adds or edits an edge leaving the grader keeps the byte pin on
- * that case even when the change is honest. That is the refusing direction.
+ * AND THE `ChannelSpec` OF EVERY CHANNEL IT READS, which is the other input of the function that
+ * builds its view. A body is handed `viewFor(state, specs, …)`: the fold pins `state`, and the
+ * candidate owns `specs`. Left unbound, a candidate re-declaring a read channel chose what the
+ * grader saw from the same stored bytes — an input as `last_write_wins_by_ts` handed as nothing,
+ * or the GRADED channel as `last_write_wins_by_ts` with an `initial` that no later write can
+ * displace, so the grader and the final view both read `undefined` while the stored channel held
+ * garbage (lane F's diff review, driven to `promote: true`). Two reviews found the same fact one
+ * spec field apart; binding the spec is the fact, not a third edge.
+ *
+ * THE COST, named: a candidate that adds or edits an edge leaving the grader, or re-declares a
+ * channel it reads, keeps the byte pin on that case even when the change is honest. That is the
+ * refusing direction.
  */
 export function graderSite(graph: RunGraph, nodeId: string): string | undefined {
   const node = graph.spec.nodes.find((n) => String(n.id) === nodeId);
@@ -246,5 +260,8 @@ export function graderSite(graph: RunGraph, nodeId: string): string | undefined 
   const out = graph.spec.edges
     .filter((e) => String(e.from) === nodeId)
     .sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
-  return digest({ node, out });
+  const channels = Object.fromEntries(
+    [...new Set(node.reads ?? [])].sort().map((r) => [r, graph.spec.channels[r] ?? null] as const),
+  );
+  return digest({ node, out, channels });
 }

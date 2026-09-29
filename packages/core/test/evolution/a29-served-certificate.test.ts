@@ -5,7 +5,7 @@
  *
  * WHAT NEWLY PASSES, stated as the set so the tests below can be read against it: a golden case
  * whose pinned channel C DIFFERS from the recording, when every grader the freeze named that reads C
- * is unchanged (identity AND site), ran once at iteration 0 on the root branch with no gate, hook or
+ * is unchanged (identity AND site), ran as one Task on the root branch with no gate, hook or
  * earlier mutation touching it, committed its own verdict(s) all `pass === true` and none below
  * threshold, and was served — per the kernel fold of the replay's shadow journal — the value of C
  * the run ENDED with and the RECORDED value of every other channel it reads. Nothing else changed:
@@ -58,6 +58,10 @@ function functions(): FunctionRegistry {
   // the graders
   f.register("function/check@stable", (v) => {
     const ok = SAME(v.get("items"), v.get("picked"));
+    return { writes: { verdict: { pass: ok, confidence: 1 } } };
+  });
+  f.register("function/subset@stable", (v) => {
+    const ok = (v.get<string[]>("picked") ?? []).every((x) => items(v).includes(x));
     return { writes: { verdict: { pass: ok, confidence: 1 } } };
   });
   f.register("function/check-rigged@stable", () => ({ writes: { verdict: { pass: true, confidence: 1 } } }));
@@ -387,16 +391,35 @@ test("GAME G · the restore trick against the RECOMMENDED topology (truth a grap
 
 // ── the conditions, one test each ───────────────────────────────────────────
 
-test("THE VIEW, NOT THE STATE · an input re-declared last_write_wins_by_ts is handed to the grader as nothing — refused", async () => {
-  const b = bench();
-  const baseline = b.compile(keep());
-  const runs = await record(b, baseline);
-  // Stored, `items` is still the recorded list; handed through `channelValue`, it is `undefined`,
-  // so `check` compares [] with [] and passes an empty answer.
-  const gamed = b.compile(keep({ pick: "function/pick-empty@stable", channels: { items: { type: "array", reduce: "last_write_wins_by_ts" } } }));
-  const r = await drive(b, freeze(baseline, runs), baseline, gamed);
-  graderSaidPass(r.cand);
-  refusedAll(r.cand, /node:check was served a "items" that is not the recorded input/);
+test("THE VIEW IS BUILT FROM SPECS THE CANDIDATE OWNS · re-declaring a channel the grader reads certifies nothing — the input, or the GRADED channel itself", async () => {
+  // An INPUT re-declared `last_write_wins_by_ts`: stored, `items` is still the recorded list;
+  // handed through `channelValue`, it is `undefined`, so `check` compares [] with [] and passes an
+  // empty answer.
+  {
+    const b = bench();
+    const baseline = b.compile(keep());
+    const runs = await record(b, baseline);
+    const gamed = b.compile(keep({ pick: "function/pick-empty@stable", channels: { items: { type: "array", reduce: "last_write_wins_by_ts" } } }));
+    const r = await drive(b, freeze(baseline, runs), baseline, gamed);
+    graderSaidPass(r.cand);
+    refusedAll(r.cand, /node:check's declaration, an edge leaving it, or a channel it reads is not the one the freeze named/);
+  }
+  // The GRADED channel re-declared `last_write_wins_by_ts` with an `initial` no write can displace
+  // (lane F's diff review, which drove it to `promote: true` before the specs were bound): stored,
+  // `picked` is ["GARBAGE"] for the whole run; handed, it is `undefined` to the grader AND in the
+  // final view — so "what was graded is what is kept" held over two `undefined`s. The frozen grader
+  // here is a realistic one: every picked item must be one of the inputs.
+  {
+    const b = bench();
+    const baseline = b.compile(keep({ check: "function/subset@stable" }));
+    const runs = await record(b, baseline);
+    const gamed = b.compile(keep({ check: "function/subset@stable", channels: { picked: { type: "array", reduce: "last_write_wins_by_ts", initial: ["GARBAGE"] } } }));
+    const r = await drive(b, freeze(baseline, runs), baseline, gamed);
+    graderSaidPass(r.cand);
+    for (const c of r.cand.cases) assert.deepEqual(c.replay?.replayed.channels["picked"], ["GARBAGE"], "the garbage is what the run kept");
+    refusedAll(r.cand, /node:check's declaration, an edge leaving it, or a channel it reads is not the one the freeze named/);
+    assert.equal(r.verdict.promote, false);
+  }
 });
 
 test("A GRADER READING A PRODUCED CHANNEL besides the graded one (the fixture topology) certifies nothing — the candidate owns both sides", async () => {
@@ -418,6 +441,15 @@ test("A GRADER READING A PRODUCED CHANNEL besides the graded one (the fixture to
   const r = await drive(b, freeze(baseline, runs), baseline, gamed);
   graderSaidPass(r.cand);
   refusedAll(r.cand, /node:check also reads "expected", which is not an input the recording was submitted with/);
+
+  // …or DELETES the fixture, so the grader compares against NOTHING: absent served, absent in the
+  // recorded inputs — equal, if equality were the only question — and an empty answer passes.
+  const vacuous = b.compile(
+    keep({ pick: "function/pick-empty@stable", check: "function/check-fixture@stable", checkReads: ["expected", "picked"], channels: { expected: arr } }),
+  );
+  const v = await drive(b, freeze(baseline, runs), baseline, vacuous);
+  graderSaidPass(v.cand);
+  refusedAll(v.cand, /node:check also reads "expected", which is not an input the recording was submitted with/);
 });
 
 test("A GRADER THAT IS NOT THE ONE FROZEN · a rigged body — refused at the case, and by 12-grader-unchanged", async () => {
@@ -443,7 +475,7 @@ test("THE SITE · an edge added leaving the grader (what ctx.node is built from)
     }),
   );
   const r = await drive(b, freeze(baseline, runs), baseline, rewired);
-  refusedAll(r.cand, /node:check's declaration or an edge leaving it is not the one the freeze named/);
+  refusedAll(r.cand, /node:check's declaration, an edge leaving it, or a channel it reads is not the one the freeze named/);
 });
 
 test("A FREEZE THAT BOUND NO DIGEST, OR NO SITE, OR NAMED NO GRADER READING THE CHANNEL certifies nothing", async () => {
@@ -454,7 +486,7 @@ test("A FREEZE THAT BOUND NO DIGEST, OR NO SITE, OR NAMED NO GRADER READING THE 
   const strip = (field: "digest" | "site") => (g: NonNullable<EvalCase["expect"]["graders"]>) =>
     Object.fromEntries(Object.entries(g).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([f]) => f !== field))])) as typeof g;
   refusedAll((await drive(b, freeze(baseline, runs, strip("digest")), baseline, honest)).cand, /with no resolved body digest/);
-  refusedAll((await drive(b, freeze(baseline, runs, strip("site")), baseline, honest)).cand, /declaration or an edge leaving it/);
+  refusedAll((await drive(b, freeze(baseline, runs, strip("site")), baseline, honest)).cand, /declaration, an edge leaving it, or a channel it reads/);
   refusedAll((await drive(b, freeze(baseline, runs, () => ({})), baseline, honest)).cand, /no grader the freeze named reads "picked"/);
 });
 

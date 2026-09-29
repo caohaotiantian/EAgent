@@ -68,7 +68,8 @@ export interface EvalCase {
      * The graders the OPERATOR'S FREEZE named for this case, keyed `node:<id>` with the identity
      * `12-grader-unchanged` compares — kind, ref, resolved digest, `reads`, `threshold`
      * (`EvalReport.evaluators`' own entry shape) — plus `site`, a digest of the grader's whole
-     * declaration and every edge leaving it (`run/served.ts` `graderSite`, and why). Written by
+     * declaration, every edge leaving it and the spec of every channel it reads (`run/served.ts`
+     * `graderSite`, and why). Written by
      * `loom suite freeze` on the golden cases that pin channels; absent on every case frozen before
      * it, which keep the byte pin unchanged. A grader with no `site` certifies nothing.
      *
@@ -436,8 +437,9 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * CERTIFIED iff, for EVERY frozen grader that reads `channel` (and there is at least one):
  *   1. IT IS THE GRADER THE FREEZE NAMED, AND ITS COMMIT IS ITS BODY'S VERDICT. The candidate's
  *      evaluator at that id has the frozen identity — kind, ref, a resolved digest (required),
- *      `reads`, `threshold` — and the frozen SITE (`graderSite`: its whole `NodeSpec` and every edge
- *      leaving it, which is what its `ctx.node` is built from). It ran as exactly one Task. No gate
+ *      `reads`, `threshold` — and the frozen SITE (`graderSite`: its whole `NodeSpec`, every edge
+ *      leaving it, which is what its `ctx.node` is built from, and the `ChannelSpec` of every channel
+ *      it reads, which with the fold's state is what its view is built from). It ran as exactly one Task. No gate
  *      was raised on it and no hook changed it (a gate decided with `edit` and
  *      a `preNode` skip both commit `succeeded` with writes no body produced), and the graph did not
  *      mutate before it committed. Its OWN commit — never the final `verdict` channel, which a later
@@ -450,7 +452,7 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  *      the truth, let the grader agree, restore it afterwards).
  *   4. `channel` WAS WRITTEN AT ALL — decided by `runCase` before this is called (game A').
  *   5. THE FOLD COULD DECIDE — `served.ts` names the undecidable set: a fan-out Task, and a Task
- *      that committed more or less than once or was leased after its commit.
+ *      that committed more or less than once, was leased after its commit, or has no lease before it.
  * Anything else keeps the byte pin, and the case's reason says which condition failed.
  *
  * NOT CHECKED, and argued rather than forgotten: that the grader is an `assertion`. A `rubric`
@@ -492,7 +494,7 @@ function certification(
     if (moved.length > 0) return no(`${scope} is not the grader the freeze named (${moved.join("; ")})`);
     const site = graderSite(graph, nodeId);
     if (frozen.site === undefined || site !== frozen.site) {
-      return no(`${scope}'s declaration or an edge leaving it is not the one the freeze named, and its body is handed both`);
+      return no(`${scope}'s declaration, an edge leaving it, or a channel it reads is not the one the freeze named, and its body is handed all three`);
     }
     const tasks = Object.values(report.replayed.tasks).filter((t) => String(t.nodeId) === nodeId);
     if (tasks.length !== 1) return no(`${scope} ran as ${String(tasks.length)} Tasks, so what it graded has more than one answer`);

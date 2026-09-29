@@ -11682,7 +11682,8 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   // this identity, certifies the candidate's value under the conditions `evolution/gate.ts`
   // `certification` states. The operator's freeze names them, never the candidate: the identity is
   // the cohort graph's, resolved here, and a candidate whose grader is not byte-for-byte this one
-  // keeps the byte pin (and is refused by `12-grader-unchanged` besides).
+  // keeps the byte pin. `12-grader-unchanged` refuses the IDENTITY half of that besides; it does not
+  // compare `site`, so a candidate that only re-wires the grader keeps the pin and is not refused.
   const graders = Object.fromEntries(
     Object.entries(evaluatorIdentities(baseline)).map(([scope, identity]) => {
       const site = graderSite(baseline, scope.slice("node:".length));
