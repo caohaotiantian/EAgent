@@ -7,12 +7,14 @@
  * answers the question itself; these tests hold it to RUNS, not to its docstring:
  *
  *  - the ones it lets through run once, driven with bodies that fail and succeed on purpose;
- *  - the ones it still refuses really do run more than once. Four rules are each NECESSARY — delete
- *    one from `multiRunNodes` and exactly its test here goes red: `error` exits only, no error edge
- *    back toward the source, the body is a tree (one arrival per member per pass), and a `once`
- *    class arriving by two edges is `top`. Three more (one loop per cycle, the loop entered once,
- *    dominance) are IMPLIED by the tree and kept as stated reasons: their graphs are refused and
- *    shown to run twice, but deleting any one of them alone leaves everything green. The barrier
+ *  - the ones it still refuses really do run more than once. Two rules are each NECESSARY — delete
+ *    one from `multiRunNodes` and exactly its test here goes red: `error` exits only, and no error
+ *    edge back toward the source. Two more — the body is a tree (one arrival per member per pass),
+ *    and a `once` class arriving by two edges is `top` — WERE necessary while a late `task.ready`
+ *    re-ran a committed Task under the same id (§A.101). Since the runtime absorbs that arrival they
+ *    are CONSERVATIVE: their graphs are still refused, and their tests now show the run ONCE, which
+ *    is what relaxing either rule has to keep true. Three more (one loop per cycle, the loop
+ *    entered once, dominance) are IMPLIED by the tree and kept as stated reasons. The barrier
  *    condition is pinned as CONSERVATIVE, with the run that shows it;
  *  - the row's own repro, a `conditional` exit, is one of those: a body's `take` bypasses `when`.
  */
@@ -196,10 +198,11 @@ test("NECESSARY: an `error` edge from the exiting node back toward the loop's so
   assert.equal((await run(graph(BODY, edges), { audit: () => FAIL })).tasks["r"], 3);
 });
 
-test("NECESSARY: a member reached by TWO edges runs twice in one pass — its failure is followed by a success", async () => {
-  // A `task.ready` that lands after a Task committed readies it AGAIN, under the same id. `X` is on
-  // the only path to `fix`, so it dominates the loop's source — and still: its first arrival (from
-  // `head`) fails and takes the exit, its second (via m1 -> m2) succeeds and carries the pass on.
+test("CONSERVATIVE SINCE §A.101: a member reached by TWO edges is refused, and runs ONCE", async () => {
+  // Before §A.101 a `task.ready` that landed after a Task committed readied it AGAIN, under the same
+  // id: X's first arrival (from `head`) failed and took the exit, its second (via m1 -> m2)
+  // succeeded and carried the pass on, and `r` ran once per pass. The late arrival is absorbed
+  // now, so X runs once, fails, and the loop ends with it.
   const ids = ["head", "X", "m1", "m2", "fix", "r"];
   const edges: Edge[] = [
     { id: "hx", from: "head", to: "X", kind: "seq" },
@@ -212,7 +215,8 @@ test("NECESSARY: a member reached by TWO edges runs twice in one pass — its fa
   ];
   assert.equal(inLoop(ids, edges, "r"), true);
   const res = await run(graph(ids, edges), { X: (_v, call) => (call % 2 === 0 ? FAIL : ok()) });
-  assert.equal(res.tasks["r"], 3, `r ran once per pass: ${JSON.stringify(res.tasks)}`);
+  assert.equal(res.calls["X"], 1, `X ran more than once: ${JSON.stringify(res.calls)}`);
+  assert.equal(res.tasks["r"], 1, `r ran once per pass: ${JSON.stringify(res.tasks)}`);
 });
 
 test("REFUSED, TWO WAYS: a path to the loop's source that bypasses the exiting node carries the pass on", async () => {
@@ -242,7 +246,7 @@ const HEAD_LOOP: readonly Edge[] = [
   { id: "gave-up", from: "H", to: "v", kind: "error" },
 ];
 
-test("NECESSARY: a loop head with TWO outside edges runs twice on the entry pass", async () => {
+test("CONSERVATIVE SINCE §A.101: a loop head with TWO outside edges is refused, and runs ONCE on the entry pass", async () => {
   const ids = ["P", "q1", "q2", "H", "S", "v"];
   const edges: Edge[] = [
     { id: "ph", from: "P", to: "H", kind: "seq" },
@@ -253,10 +257,12 @@ test("NECESSARY: a loop head with TWO outside edges runs twice on the entry pass
   ];
   assert.equal(inLoop(ids, edges, "v"), true);
   const res = await run(graph(ids, edges), HEAD_BODIES);
-  assert.equal(res.tasks["v"], 2, `v#0 and v#2: ${JSON.stringify(res)}`);
+  // Before §A.101: `v#0` and `v#2` — H's late arrival re-ran it and carried the pass on.
+  assert.equal(res.calls["H"], 1, `H ran more than once: ${JSON.stringify(res)}`);
+  assert.equal(res.tasks["v"], 1, `v#0 only: ${JSON.stringify(res)}`);
 });
 
-test("NECESSARY: a loop head whose ONE outside edge comes from a node that arrives twice", async () => {
+test("CONSERVATIVE SINCE §A.101: a loop head whose ONE outside edge comes from a node that arrives twice is refused, and runs ONCE", async () => {
   const ids = ["s", "m1", "m2", "P", "H", "S", "v"];
   const edges: Edge[] = [
     { id: "sp", from: "s", to: "P", kind: "seq" },
@@ -268,10 +274,11 @@ test("NECESSARY: a loop head whose ONE outside edge comes from a node that arriv
   ];
   assert.equal(inLoop(ids, edges, "v"), true);
   const res = await run(graph(ids, edges), HEAD_BODIES);
-  assert.equal(res.tasks["v"], 2, `v#0 and v#2: ${JSON.stringify(res)}`);
+  assert.equal(res.calls["P"], 1, `P ran more than once: ${JSON.stringify(res)}`);
+  assert.equal(res.tasks["v"], 1, `v#0 only: ${JSON.stringify(res)}`);
 });
 
-test("A ONCE-CLASS ARRIVING BY TWO EDGES is refused: the late arrival re-runs the node at the same iteration", async () => {
+test("CONSERVATIVE SINCE §A.101: a once-class arriving by two edges is refused, and the late arrival no longer re-runs the node", async () => {
   // r is a clean exit target; r -> a -> z and r -> b1 -> b2 -> b3 -> z reach `z` twice, the second
   // arrival after `z` has committed.
   const ids = [...BODY, "a", "b1", "b2", "b3", "z"];
@@ -288,7 +295,7 @@ test("A ONCE-CLASS ARRIVING BY TWO EDGES is refused: the late arrival re-runs th
   assert.equal(inLoop(ids, edges, "z"), true);
   const res = await run(graph(ids, edges), { audit: FAIL_ALWAYS, z: (_v, call) => (call === 0 ? FAIL : ok()) });
   assert.equal(res.tasks["z"], 1, "one Task id…");
-  assert.equal(res.calls["z"], 2, `…run twice: ${JSON.stringify(res.calls)}`);
+  assert.equal(res.calls["z"], 1, `…run once — before §A.101, twice: ${JSON.stringify(res.calls)}`);
 });
 
 test("REFUSED, AND RUNS TWICE (implied by the tree): a loop ENTERED once per pass of another loop runs its last pass once per entry", async () => {
