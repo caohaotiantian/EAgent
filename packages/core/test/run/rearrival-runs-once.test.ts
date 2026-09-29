@@ -33,6 +33,21 @@
  *      (b) An arrival while the target is still `leased` is the case the fold CANNOT refuse,
  *      because `rewind` re-arms a `leased` Task with the same row — so the engine does not write
  *      it: `#activate` mints no Task the fresh projection already holds.
+ *
+ * And the barrier the re-run was carrying:
+ *
+ *   6. A static join whose member committed while another path into its ancestry still ran. The
+ *      barrier stood down at the member's commit, and unfixed the late arrival RE-RAN the member,
+ *      whose second commit asked it again. Absorbing that arrival stranded the join — `succeeded`
+ *      with the node behind it never run. A settled barrier is now released between waves from
+ *      the projection AFTER every commit (`#releaseSettledBarriers`), which also closes the same
+ *      strand reached with no arrival at all (a `conditional` not taken), PRE-EXISTING on
+ *      `e59a969a`. 6z: a barrier no member ever reached still does not release, as on base.
+ *   7. A run bound to fail on a NON-member releases nothing — `deploy` behind the join never
+ *      commits (7b's one-hop shape committed it on `e59a969a`).
+ *   8. Nested fan-outs with a skipped inner item: nothing releases before its last arrival — the
+ *      shape a first, commit-time re-ask got wrong (10 of 48 configurations lost a branch).
+ *   9. A holder `awaiting_gate` is live: answering ANOTHER gate does not release the barrier.
  */
 
 import assert from "node:assert/strict";
@@ -73,7 +88,14 @@ function graphSpec(name: string, nodes: readonly unknown[], edges: readonly [str
     inputs: ["seed"],
     outputs,
     nodes,
-    edges: edges.map(([id, from, to, kind]) => ({ id: id as EdgeId, from: n(from), to: n(to), kind: kind ?? "seq" })),
+    // Every `conditional` edge in this file is one that is NOT taken: `seed` is always "x".
+    edges: edges.map(([id, from, to, kind]) => ({
+      id: id as EdgeId,
+      from: n(from),
+      to: n(to),
+      kind: kind ?? "seq",
+      ...(kind === "conditional" ? { when: 'seed == "never"' } : {}),
+    })),
   } as unknown as GraphSpec;
 }
 
@@ -367,3 +389,283 @@ test("5b · an arrival while the target is still LEASED is not written as a re-a
   assert.deepEqual(r.log.filter((x) => x === "after"), ["after"]);
 });
 
+// ── 6 · a barrier whose re-evaluation the re-run was carrying ───────────────
+
+/**
+ * A static join over `m`, where a second path into `m`'s ancestry is still running when `m`
+ * commits. `#maybeFireJoin` stands down at that commit — the running path statically reaches a
+ * member, so an arrival looks possible — and unfixed, the arrival came: it re-ran the node and
+ * `m` committed AGAIN, which re-asked the barrier and fired it. With the re-run gone, nothing
+ * re-asked it: `J` never ran and the run still said `succeeded` (found by lane K's reviewer).
+ *
+ * So a settled barrier is released between waves, from the projection AFTER every commit so far
+ * (`#releaseSettledBarriers`) — not from the committing Task's view before its own append, which
+ * a first attempt used and which released nested fan-outs' outer barriers early (see 8).
+ */
+function joinShape(
+  name: string,
+  nodes: readonly string[],
+  edges: readonly [string, string, string, string?][],
+  members: readonly string[] = ["m"],
+  after = "done",
+): GraphSpec {
+  const spec = graphSpec(name, [...nodes, after].map((id) => fn(id)), [...edges, ["jd", "J", after]]) as unknown as {
+    nodes: unknown[];
+    edges: unknown[];
+  };
+  spec.nodes.push({ id: n("J"), type: "join", reads: ["log"], writes: ["log"], join: { branches: members.map(n), mode: "all", onBranchError: "skip" } });
+  for (const m of members) spec.edges.push({ id: `j-${m}` as EdgeId, from: n(m), to: n("J"), kind: "join", branches: members.map(n) });
+  return spec as unknown as GraphSpec;
+}
+
+const JOIN_SHAPES: readonly [string, GraphSpec][] = [
+  [
+    "the fan-in is UPSTREAM of the member: start→p beside start→a→a1→a2→p, p→m",
+    joinShape("join-upstream", ["start", "a", "a1", "a2", "p", "m"], [
+      ["sp", "start", "p"],
+      ["sa", "start", "a"],
+      ["aa1", "a", "a1"],
+      ["a1a2", "a1", "a2"],
+      ["a2p", "a2", "p"],
+      ["pm", "p", "m"],
+    ]),
+  ],
+  [
+    // PRE-EXISTING, on `e59a969a` too: the holder ends because its path is not TAKEN. The same
+    // missing re-ask, reached without any arrival at all.
+    "the holder's path is not taken: start→m beside start→a→a1 -conditional(false)→ a2→m",
+    joinShape("join-not-taken", ["start", "a", "a1", "a2", "m"], [
+      ["sm", "start", "m"],
+      ["sa", "start", "a"],
+      ["aa1", "a", "a1"],
+      ["a1a2", "a1", "a2", "conditional"],
+      ["a2m", "a2", "m"],
+    ]),
+  ],
+  [
+    "the fan-in IS the member: start→m beside start→a→a1→a2→m",
+    joinShape("join-at-member", ["start", "a", "a1", "a2", "m"], [
+      ["sm", "start", "m"],
+      ["sa", "start", "a"],
+      ["aa1", "a", "a1"],
+      ["a1a2", "a1", "a2"],
+      ["a2m", "a2", "m"],
+    ]),
+  ],
+];
+
+for (const [label, spec] of JOIN_SHAPES) {
+  for (const par of [1, 4, 16]) {
+    test(`6 · the barrier is asked again when the path holding it ends — ${label} (maxParallelism ${par})`, async () => {
+      const store = new MemoryStateStore({ now: () => NOW });
+      const engine = engineFor(store, ["start", "a", "a1", "a2", "p", "m", "done"], {}, par);
+      const graph = compileOrThrow({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+      const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+      const p = await engine.advance(runId);
+      const log = (p.outputs?.["log"] as string[]) ?? [];
+      assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+      const j = await journal(store, runId);
+      assert.equal(rows(j, "task.committed", "J@root#0"), 1, `the barrier never fired: ${JSON.stringify(log)}`);
+      assert.deepEqual(log.filter((x) => x === "done"), ["done"], JSON.stringify(log));
+      assert.deepEqual(log.filter((x) => x === "m"), ["m"], `the member ran more than once: ${JSON.stringify(log)}`);
+    });
+  }
+}
+
+
+/**
+ * THE OTHER HALF OF THE RULE: a barrier NO member ever reached does not release. The only member
+ * sits behind a `conditional` that is not taken, so no member Task exists — and base never fired
+ * this join either. Releasing it would run `done` on a branch the graph chose not to take.
+ */
+for (const par of [1, 4]) {
+  test(`6z · a barrier whose only member was never reached does not release (maxParallelism ${par})`, async () => {
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = engineFor(store, ["start", "m", "done"], {}, par);
+    const spec = joinShape("join-zero-members", ["start", "m"], [["sm", "start", "m", "conditional"]]);
+    const graph = compileOrThrow({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+    const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+    const p = await engine.advance(runId);
+    const j = await journal(store, runId);
+    assert.equal(rows(j, "task.ready", "J@root#0"), 0, "a barrier with no member released");
+    assert.deepEqual(p.outputs?.["log"], ["start"]);
+  });
+}
+
+// ── 7 · a run that is failing releases nothing behind a barrier ─────────────
+
+const THROWS: Record<string, Body> = {
+  x: () => {
+    throw new Error("x fails, and nothing handles it");
+  },
+};
+
+async function driveFailing(spec: GraphSpec, par: number): Promise<{ status: string; j: JournalEvent[]; log: unknown }> {
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = engineFor(store, ["start", "a", "x", "m", "m1", "m2", "deploy"], THROWS, par);
+  const graph = compileOrThrow({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+  const p = await engine.advance(runId);
+  return { status: p.status, j: await journal(store, runId), log: p.channels["log"] };
+}
+
+for (const par of [1, 4]) {
+  test(`7a · start→x(throws)→m -join→ J→deploy never commits deploy (maxParallelism ${par})`, async () => {
+    const r = await driveFailing(joinShape("fail-before-member", ["start", "x", "m"], [["sx", "start", "x"], ["xm", "x", "m"]], ["m"], "deploy"), par);
+    assert.equal(r.status, "failed");
+    assert.equal(rows(r.j, "task.committed", "deploy@root#0"), 0, `deploy ran in a failing run: ${JSON.stringify(r.log)}`);
+  });
+
+  // The holder path to m2 FAILS with nothing to handle it, beside a member m1 that arrives. Once
+  // both are over the barrier looks settled — m1 terminal, nothing live reaches m2 — and releasing
+  // it commits `deploy` in a run `#finish` is about to fail. Two hop counts, because the two
+  // askers meet it at different instants: x one hop from `start` fails BEFORE m1 commits, so m1's
+  // own commit is what would release (PRE-EXISTING: `deploy` committed on `e59a969a`, at par 1 and
+  // 4); x two hops away fails AFTER, so only the between-waves pass could.
+  for (const [hops, spec] of [
+    ["x one hop out", joinShape("fail-beside-1", ["start", "x", "m1", "m2"], [["s1", "start", "m1"], ["sx", "start", "x"], ["x2", "x", "m2"]], ["m1", "m2"], "deploy")],
+    ["x two hops out", joinShape("fail-beside-2", ["start", "a", "x", "m1", "m2"], [["s1", "start", "m1"], ["sa", "start", "a"], ["ax", "a", "x"], ["x2", "x", "m2"]], ["m1", "m2"], "deploy")],
+  ] as const) {
+    test(`7b · a holder that FAILS unhandled does not release the barrier it held — ${hops} (maxParallelism ${par})`, async () => {
+      const r = await driveFailing(spec, par);
+      assert.equal(r.status, "failed");
+      assert.equal(rows(r.j, "task.ready", "J@root#0"), 0, "the barrier released in a failing run");
+      assert.equal(rows(r.j, "task.committed", "deploy@root#0"), 0, `deploy ran in a failing run: ${JSON.stringify(r.log)}`);
+    });
+  }
+}
+
+// ── 8 · nested fan-outs: nothing releases before its last arrival ───────────
+
+/**
+ * `join-nesting.test.ts`'s shape with an inner body that throws for one item under
+ * `onBranchError: "skip"`. Round 1 of this fix re-asked the outer barrier from the committing
+ * inner branch, from the projection before its own append — which could not see the inner join
+ * that append released, or `#topUpFanout`'s next branch — and released `outerJoin` early: 10 of 48
+ * configurations, a whole outer branch's contributions lost (`["A0","finish saw [\"A0\"]"]` where
+ * base read `["A0","B0",…]`). A representative 16 of those 48, each asserted against the answer
+ * computed from the items, which is also base's.
+ */
+function nestedSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "nested-skip", project: "probe", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 64, maxDepth: 3, maxFanout: 16, maxLoopIterations: 1 } },
+    channels: {
+      seed: { type: "string", reduce: "replace" },
+      log: { type: "array", reduce: "append_ordered" },
+      outerSeed: { type: "array", reduce: "replace" },
+      innerSeed: { type: "array", reduce: "replace" },
+      outerItem: { type: "object", reduce: "replace" },
+      innerItem: { type: "object", reduce: "replace" },
+    },
+    inputs: ["seed", "outerSeed", "innerSeed"],
+    outputs: ["log"],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["outerSeed"], function: { ref: "function/start@stable" } },
+      { id: n("outer"), type: "function", reads: ["outerItem"], function: { ref: "function/outer@stable" } },
+      { id: n("inner"), type: "function", reads: ["innerItem", "outerItem"], writes: ["log"], function: { ref: "function/inner@stable" } },
+      { id: n("innerJoin"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("inner")], mode: "all", onBranchError: "skip" } },
+      { id: n("outerJoin"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("outer"), n("innerJoin")], mode: "all", onBranchError: "skip" } },
+      { id: n("finish"), type: "function", reads: ["log"], writes: ["log"], function: { ref: "function/finish@stable" } },
+    ],
+    edges: [
+      { id: "fo", from: n("start"), to: n("outer"), kind: "fanout", over: "outerSeed", as: "outerItem", maxWidth: 8 },
+      { id: "fi", from: n("outer"), to: n("inner"), kind: "fanout", over: "innerSeed", as: "innerItem", maxWidth: 8 },
+      { id: "ji", from: n("inner"), to: n("innerJoin"), kind: "join", branches: [n("inner")] },
+      { id: "jo1", from: n("outer"), to: n("outerJoin"), kind: "join", branches: [n("outer")] },
+      { id: "jo2", from: n("innerJoin"), to: n("outerJoin"), kind: "join", branches: [n("innerJoin")] },
+      { id: "done", from: n("outerJoin"), to: n("finish"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+for (const ow of [1, 2]) {
+  for (const iw of [2, 3]) {
+    for (const par of [1, 3]) {
+      for (const failing of ["first", "last"] as const) {
+        test(`8 · nested fan-out, one inner item throws — no barrier releases before its last arrival (outer ${ow}, inner ${iw}, par ${par}, fail ${failing})`, async () => {
+          const fails = (i: number): boolean => (failing === "first" ? i === 0 : i === 1);
+          const store = new MemoryStateStore({ now: () => NOW });
+          const engine = engineFor(store, ["start", "outer", "inner", "finish"], {
+            start: () => ({}),
+            outer: () => ({}),
+            inner: (view) => {
+              const o = view.get<{ o: string }>("outerItem")?.o;
+              const i = view.get<{ i: number }>("innerItem")?.i ?? -1;
+              if (fails(i)) throw new Error(`boom ${o}${i}`);
+              return { writes: { log: [`${o}${i}`] } };
+            },
+            finish: (view) => ({ writes: { log: [`finish saw ${JSON.stringify(view.get("log"))}`] } }),
+          }, par);
+          const graph = compileOrThrow({ spec: nestedSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] });
+          const outers = ["A", "B"].slice(0, ow);
+          const runId = await engine.submit({
+            graph,
+            inputs: { seed: "x", outerSeed: outers.map((o) => ({ o })), innerSeed: Array.from({ length: iw }, (_, i) => ({ i })) },
+          });
+          const p = await engine.advance(runId);
+          const j = await journal(store, runId);
+
+          const released = j.find((ev) => ev.type === "task.ready" && ev.taskId === "outerJoin@root#0");
+          assert.ok(released !== undefined, "the outer barrier never released");
+          const lateMembers = j.filter(
+            (ev) => ev.type === "task.committed" && ev.seq > released.seq && /^(outer|innerJoin)@/.test(String(ev.taskId)),
+          );
+          assert.deepEqual(lateMembers.map((ev) => ev.taskId), [], "a member of the outer barrier committed after it released");
+
+          const survived = outers.flatMap((o) => Array.from({ length: iw }, (_, i) => i).filter((i) => !fails(i)).map((i) => `${o}${i}`));
+          assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+          assert.deepEqual(p.outputs?.["log"], [...survived, `finish saw ${JSON.stringify(survived)}`]);
+        });
+      }
+    }
+  }
+}
+
+// ── 9 · a holder waiting on a person is live ────────────────────────────────
+
+/**
+ * The between-waves pass counts EVERY live state as a holder, not only `ready` — and the one a
+ * run meets there in-process is `awaiting_gate`: answering one of two open gates resumes the run
+ * while the other still waits. Here `m1` has arrived, `G2` is the only way to `m2`, and the
+ * human answers `G1` first. Releasing then would fold `m1` alone and lose `m2`.
+ */
+test("9 · a barrier whose holder is still awaiting a person does not release when ANOTHER gate is answered", async () => {
+  const gate = (id: string): Record<string, unknown> => ({
+    id: n(id),
+    type: "human_gate",
+    reads: ["seed"],
+    writes: ["log"],
+    humanGate: { ref: "oversight/demo-write@stable" },
+  });
+  const spec = joinShape(
+    "gate-holder",
+    ["start", "m1", "m2", "g1after"],
+    [["s1", "start", "m1"], ["sg1", "start", "G1"], ["sg2", "start", "G2"], ["g1a", "G1", "g1after"], ["g2m", "G2", "m2"]],
+    ["m1", "m2"],
+  ) as unknown as { nodes: unknown[] };
+  spec.nodes.push(gate("G1"), gate("G2"));
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = engineFor(store, ["start", "m1", "m2", "g1after", "done"], {}, 4);
+  const graph = compileOrThrow({ spec: spec as unknown as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+  let p = await engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate");
+  const byNode = async (id: string) => (await engine.openGates(runId)).find((g) => g.state === "open" && g.nodeId === id);
+  assert.ok((await byNode("G1")) !== undefined && (await byNode("G2")) !== undefined, "both gates are open at once");
+
+  await engine.resolveGate(runId, { gateId: (await byNode("G1"))!.gateId, decision: { kind: "approve" }, actor: alice, idempotencyKey: "g1" });
+  p = await engine.advance(runId);
+  assert.equal(rows(await journal(store, runId), "task.ready", "J@root#0"), 0, "the barrier released while G2 still held m2's path");
+
+  await engine.resolveGate(runId, { gateId: (await byNode("G2"))!.gateId, decision: { kind: "approve" }, actor: alice, idempotencyKey: "g2" });
+  p = await engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  const j = await journal(store, runId);
+  const released = j.find((ev) => ev.type === "task.ready" && ev.taskId === "J@root#0");
+  const m2 = j.find((ev) => ev.type === "task.committed" && ev.taskId === "m2@root#0");
+  assert.ok(released !== undefined && m2 !== undefined && m2.seq < released.seq, "the barrier released before m2 arrived");
+  assert.deepEqual(p.outputs?.["log"], ["start", "m1", "g1after", "m2", "done"]);
+});

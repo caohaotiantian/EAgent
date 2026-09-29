@@ -3496,6 +3496,20 @@ export class Engine {
         return this.#settled(ctx);
       }
 
+      // A BARRIER THE PROJECTION SAYS IS SETTLED IS RELEASED BEFORE ANYTHING ELSE IS DECIDED —
+      // including "nothing is ready, finish the run" below, which is where a stranded barrier used
+      // to end as `succeeded`. See `#releaseSettledBarriers`. A conditional append at `p.seq`: the
+      // decision was made against that projection, so a moved head means ask again, not append.
+      const released = this.#releaseSettledBarriers(ctx, p);
+      if (released.length > 0) {
+        try {
+          await this.#serialize(runId, () => ctx.log.commit(p.seq, released));
+        } catch (thrown) {
+          if (!(isLoomError(thrown) && thrown.code === CODES.E_SEQ_CONFLICT)) throw thrown;
+        }
+        continue;
+      }
+
       // WHICH Tasks to run is the scheduler's question; HOW they run is not, and never
       // varies between deployments. Swapping in a partitioned scheduler is a constructor
       // argument, which is the whole content of "changes implementations, never call
@@ -12548,6 +12562,21 @@ export class Engine {
    * the member edges have already fired the barrier by the time it gets here. `edge` is read for
    * `edge.to` (the join node) and for `edgesIn` on the row; nothing else about its kind is used,
    * which is what makes the extra callers safe.
+   *
+   * THE INVARIANT IS A PROPERTY OF THE PROJECTION, NOT OF WHICH TASK COMMITTED. A barrier
+   * instance (a join node at a parent coordinate) releases when at least one member Task exists
+   * there, and `barrierReleases` holds on the counts `#joinArrivals` reads — where "quiescent"
+   * means no Task at or under the parent in a LIVE state (anything `isTerminalTaskState` says is
+   * not over) belongs to a node that is, or statically reaches, a member. That question has two
+   * askers, and neither alone is enough:
+   *
+   *   - THIS METHOD, at a member's commit, from the projection BEFORE it with the member's own
+   *     outcome and `take` substituted. It answers early — in the same append as the member — and
+   *     it is where every barrier on base released. But it cannot see Tasks this append mints, so
+   *     it stands down whenever it is unsure, and it is asked at no other instant.
+   *   - `#releaseSettledBarriers`, between waves, from the projection AFTER every commit so far
+   *     — this append's mints and every absorbed arrival included. It catches the barriers this
+   *     method stood down on and nothing afterwards asked again (§A.101).
    */
   #maybeFireJoin(
     ctx: RunContext,
@@ -12573,6 +12602,11 @@ export class Engine {
     const parentPath = encodeBranch(parent);
     const joinTaskId = makeTaskId(edge.to, parent, 0);
     if (p.tasks[joinTaskId] !== undefined) return undefined; // already fired
+    // A RUN BOUND TO FAIL ON A NON-MEMBER RELEASES NOTHING — see `#failingOutside`. Measured on
+    // `start→m1` beside `start→x(throws)→m2`, `m1,m2 -join-> J -seq-> deploy`, at `maxParallelism`
+    // 1 and 4, on `e59a969a`: x failed, m1's commit found nothing live and released, and `deploy`
+    // committed in a run that then ended `failed`. PRE-EXISTING; `deployCommitted` 1 → 0.
+    if (this.#failingOutside(ctx, p, join)) return undefined;
 
     // THE ARRIVAL COUNTS, AND THEY ARE `#foldJoin`'S TOO — see `#joinArrivals`. `p` predates
     // this Task's own commit, so its outcome is substituted there rather than counted twice,
@@ -12665,18 +12699,7 @@ export class Engine {
     // WHAT IT NO LONGER SAYS, because §D.9 answered it: that an empty fold's worth is the
     // operator's call. `onBranchError: "skip"` still absorbs every loss short of the last one,
     // but a barrier not one of whose members succeeded is refused whatever it says.
-    const noMoreArrivals = quiescent && terminal >= expected;
-    const fire = (() => {
-      switch (join.mode) {
-        case "all":
-          return noMoreArrivals;
-        case "any":
-        case "firstSuccess":
-          return succeeded >= 1 || noMoreArrivals;
-        case "quorum":
-          return succeeded >= quorumNeed(join, expected) || noMoreArrivals;
-      }
-    })();
+    const fire = barrierReleases(join, { succeeded, terminal, expected, quiescent });
 
     if (!fire) return undefined;
     return {
@@ -12765,10 +12788,7 @@ export class Engine {
     // "A RUN THAT SUCCEEDS CLOSES ITS OPEN GATES TOO" is the shape: the floor reaches `#finish`
     // with the declared outputs already written, and a run that produced everything it promised
     // did not fail because the money ran out on the way past the finish line.
-    const fatal = Object.values(p.tasks).filter((t) => t.state === "failed" && RUN_FATAL_CODES.has(t.error?.code ?? ""));
-    const failed = fatal.length > 0
-      ? fatal
-      : Object.values(p.tasks).filter((t) => t.state === "failed" && t.take.length === 0 && !this.#absorbedByJoin(ctx, t.nodeId));
+    const failed = this.#failuresThatFailTheRun(ctx, p);
     if (failed.length > 0) {
       const first = failed[0]!;
       await this.#failRun(
@@ -12867,6 +12887,109 @@ export class Engine {
    * least: `#compensate` re-plans from the journal, so an effect that lands during the rollback
    * is picked up by the next pass rather than by none.
    */
+  /**
+   * The failed Tasks that fail the run — `#finish`'s question, asked once for both its readers.
+   *
+   * A run-fatal code wins outright; otherwise an ordinary failure fails the run when it took no
+   * edge and no downstream join absorbs it. `#finish` fails the run on the first of these, and
+   * `#failingOutside` asks it so that no barrier releases on the way there.
+   */
+  #failuresThatFailTheRun(ctx: RunContext, p: RunProjection): readonly TaskRecord[] {
+    const fatal = Object.values(p.tasks).filter((t) => t.state === "failed" && RUN_FATAL_CODES.has(t.error?.code ?? ""));
+    return fatal.length > 0
+      ? fatal
+      : Object.values(p.tasks).filter((t) => t.state === "failed" && t.take.length === 0 && !this.#absorbedByJoin(ctx, t.nodeId));
+  }
+
+  /**
+   * True when the run is bound to fail on a Task that is NOT a member of this barrier — and so the
+   * barrier must not release: the work behind it would start in a run `#finish` will fail.
+   *
+   * A MEMBER's failure is excluded on purpose. Under `onBranchError: "fail"` a failed member is the
+   * barrier's to judge — `#foldJoin` refuses with its own error — and suppressing the release would
+   * replace that verdict with the member's raw error. What this refuses is a NON-member's ending,
+   * the holder path that failed with nothing to handle it.
+   */
+  #failingOutside(ctx: RunContext, p: RunProjection, join: JoinNode): boolean {
+    return this.#failuresThatFailTheRun(ctx, p).some((t) => !join.branches.includes(t.nodeId));
+  }
+
+  /**
+   * Release every barrier the projection says is settled and nothing has released — §A.101.
+   *
+   * WHY IT EXISTS. `#maybeFireJoin` is asked only at a member's commit and stands down while any
+   * live Task could still reach a member. When that holder later ended WITHOUT arriving, nothing
+   * asked again, the barrier never released, and `#finish` called the run `succeeded` with the
+   * work behind the join never done. Two ways a holder ends like that, both measured on
+   * `start→m` beside `start→a→a1→a2→m`, `m -join-> J -seq-> done`, at `maxParallelism: 4`:
+   *
+   *   - its path is not taken (a `conditional` false) — PRE-EXISTING on `e59a969a`;
+   *   - its arrival is ABSORBED (`#absorbsArrival`). Before §A.101 that arrival RE-RAN the
+   *     member, and the member's second commit is what asked the barrier again.
+   *
+   * WHY HERE AND NOT AT THE COMMIT. A first attempt re-asked from the committing non-member, from
+   * the projection BEFORE its append — which cannot see the Tasks that append mints (an inner
+   * join's release, `#topUpFanout`'s next branch). It released outer barriers of nested fan-outs
+   * early and lost a branch's contributions (10 of 48 configurations). This reads the projection
+   * AFTER every commit so far, at the top of each pass of the drive loop, so every mint is in it.
+   * And because it is a pure function of the fold, a crash between a commit and this append costs
+   * nothing: the next `advance` — any process, any restart — asks again and gets the same answer.
+   *
+   * WHAT IT RELEASES, named:
+   *   - an instance only where at least one MEMBER Task exists at or under its parent. A barrier
+   *     no member ever reached — the only member behind a `conditional` not taken — does NOT
+   *     release, as on base. (A fan of width zero is `#fireEmptyJoin`'s, and mints directly.)
+   *   - only when `barrierReleases` holds with `quiescent` read off the post-commit projection —
+   *     the same counts, the same mode rule, the same live-reaches-a-member test
+   *     `#maybeFireJoin` applies.
+   *   - nothing while the run is bound to fail on a NON-member (`#failingOutside`, which
+   *     `#maybeFireJoin` asks too): releasing would start the work behind the barrier in a run
+   *     `#finish` is about to fail.
+   *
+   * It releases the barrier's iteration-0 Task, as `#maybeFireJoin` does; a join inside a loop
+   * keying every pass at `#0` is pre-existing and on no row this change closes.
+   */
+  #releaseSettledBarriers(ctx: RunContext, p: RunProjection): NewEvent[] {
+    const out: NewEvent[] = [];
+    let all: readonly TaskRecord[] | undefined;
+    for (const node of ctx.index.byId.values()) {
+      const join = node.join;
+      if (join === undefined) continue;
+      if (this.#failingOutside(ctx, p, join)) continue;
+      all ??= branchIndexOf(p).all;
+      const members = new Set<string>(join.branches);
+      const reaches = (id: NodeId): boolean =>
+        join.branches.some((bn) => bn === id || (ctx.index.ancestors.get(bn as NodeId)?.has(id) ?? false));
+
+      // THE INSTANCES THAT EXIST: the parent coordinate of every member Task, found the way
+      // `#maybeFireJoin` finds it — from the graph's fan-out depth, not the Task's own depth.
+      const parents = new Map<string, BranchCoordinate>();
+      for (const t of all) {
+        if (!members.has(t.nodeId)) continue;
+        const depth = ctx.index.fanoutDepth.get(node.id) ?? Math.max(0, t.branch.segments.length - 1);
+        if (depth > t.branch.segments.length) continue;
+        const parent: BranchCoordinate = { segments: t.branch.segments.slice(0, depth) };
+        parents.set(encodeBranch(parent), parent);
+      }
+
+      for (const [parentPath, parent] of parents) {
+        const taskId = makeTaskId(node.id, parent, 0);
+        if (p.tasks[taskId] !== undefined) continue;
+        const { succeeded, terminal, expected } = this.#joinArrivals(ctx, p, join, parent);
+        const live = all.some((t) => !isTerminalTaskState(t.state) && isAtOrUnderBranch(t.branch, parent) && reaches(t.nodeId));
+        if (!barrierReleases(join, { succeeded, terminal, expected, quiescent: !live })) continue;
+        const entrance = (ctx.index.inbound.get(node.id) ?? []).find((e) => e.kind === "join");
+        out.push({
+          type: "task.ready",
+          payload: { nodeId: node.id, branchPath: parentPath, edgesIn: entrance === undefined ? [] : [entrance.id] },
+          actor: SYSTEM_ACTOR("scheduler"),
+          taskId,
+        });
+      }
+    }
+    return out;
+  }
+
   async #failRun(ctx: RunContext, p: RunProjection, error: ErrorRecord): Promise<void> {
     await this.#compensate(ctx, p, "run_failed");
     await this.#serialize(ctx.runId, () =>
@@ -13179,6 +13302,32 @@ const VERDICT_SCHEMA: JSONSchema = {
 function quorumNeed(join: JoinNode, expected: number): number {
   const k = join.k ?? 1;
   return k <= 1 ? Math.ceil(k * expected) : k;
+}
+
+/**
+ * Whether a barrier with these counts releases — THE ONE MODE RULE, for its two askers.
+ *
+ * `#maybeFireJoin` asks at a member's commit, from the projection before it plus the member's own
+ * outcome; `#releaseSettledBarriers` asks between waves, from the projection after every commit
+ * so far. They must never disagree about what the counts MEAN, so the switch is here once. Every
+ * mode short-circuits on evidence in hand; the answers resting on ABSENCE ("every branch is in")
+ * need `quiescent` — see `#maybeFireJoin` for why.
+ */
+function barrierReleases(
+  join: JoinNode,
+  c: { readonly succeeded: number; readonly terminal: number; readonly expected: number; readonly quiescent: boolean },
+): boolean {
+  const noMoreArrivals = c.quiescent && c.terminal >= c.expected;
+  switch (join.mode) {
+    case "all":
+      return noMoreArrivals;
+    case "any":
+    case "firstSuccess":
+      return c.succeeded >= 1 || noMoreArrivals;
+    case "quorum":
+      return c.succeeded >= quorumNeed(join, c.expected) || noMoreArrivals;
+  }
+  return false;
 }
 
 function pick(obj: Readonly<Record<string, unknown>>, keys: readonly string[]): Record<string, unknown> {
