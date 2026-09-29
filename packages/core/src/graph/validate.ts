@@ -5453,21 +5453,27 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   // THAT the validator can see. So constraining the inbound list closes the set by construction,
   // and the earlier clauses fall out of it rather than needing their own patch.
   //
-  // THE CLAIM, STATED AT THE WIDTH IT HOLDS: every entrance that can CREATE a join Task is
-  // derived from an edge whose `to` is that join. NOT "every `task.ready`" — three of the seven
-  // sites below are not edge-derived at all, and an earlier draft of this sentence said
-  // otherwise. Two of those three can only re-ready a Task that already exists, and the third
-  // cannot reach a join this clause covers.
+  // THE CLAIM, STATED AT THE WIDTH IT HOLDS: every site that can CREATE a join Task either walks
+  // that join's own `join` edges or tests quiescence over `join.branches` — the two things this
+  // clause constrains. NOT "every `task.ready`": four of the seven sites below never create a join
+  // Task at its parent coordinate. (Until §A.101 the claim was "derived from an edge whose `to` is
+  // that join", which held while the barrier was released at a member's commit; it is released
+  // between waves now, from the projection, so the membership half below is what binds it.)
   //
   // NAMED RATHER THAN ASSERTED, because "this is total" is the claim that failed four times.
-  // `run/engine.ts` emits `type: "task.ready"` at exactly SEVEN sites, and here is each one
-  // against a covering join:
+  // `run/engine.ts` emits `type: "task.ready"` at exactly SEVEN sites (§A.101 removed
+  // `#maybeFireJoin` and added `#releaseSettledBarriers`), and here is each one against a
+  // covering join:
   //
-  //   `#activate`, generic arm       one per INBOUND edge of any kind — the fourth entrance,
-  //                                  and the reason this clause is keyed where it is
-  //   `#activate`, join arm          reached only through an OUTBOUND `join` edge, into
-  //                                  `#maybeFireJoin`
-  //   `#maybeFireJoin`               same, and the only one that tests quiescence
+  //   `#activate`, generic arm       one per INBOUND edge — and for an edge into a join node it
+  //                                  mints NOTHING (`continue`), except a `loop` edge, which mints
+  //                                  `iteration + 1`, a Task the barrier never owns. The fourth
+  //                                  entrance is closed in the engine as well as refused here
+  //   `#releaseSettledBarriers`      THE ONLY site that releases a barrier with members: between
+  //                                  waves, where a member Task exists and nothing live at or under
+  //                                  the parent is or reaches a node in `join.branches`. NOT
+  //                                  edge-derived — which is why MEMBERSHIP below still matters: a
+  //                                  branch node the join does not declare never holds it
   //   `#fireEmptyJoin`               walks the empty fan-out target's OUTBOUND `join` edges
   //   `#branchReady`                 `e.to` of a `fanout` edge — refused here as an inbound
   //                                  edge that is not `kind: "join"`, and by W3 besides
@@ -5484,10 +5490,11 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   //                                  again. It also `return`s before `#activate`, so a retried
   //                                  fan-out planner does not re-plan the fan
   //
-  // Four are edge-derived and constrained here; `#branchReady` is edge-derived and refused; two
-  // re-arm an existing Task and one cannot reach this join. If an eighth site appears, or one of
-  // these learns to CREATE a join Task with no edge, this clause is false again and the
-  // exemption has to go back to refusing.
+  // Two create a join Task and are bound by this clause (`#releaseSettledBarriers` by membership,
+  // `#fireEmptyJoin` by the join edges); `#branchReady` is edge-derived and refused; the generic
+  // arm creates none; two re-arm an existing Task; one cannot reach this join. If an eighth site
+  // appears, or one of these learns to CREATE a join Task some other way, this clause is false
+  // again and the exemption has to go back to refusing.
   //
   // WHAT THE FOURTH ENTRANCE LOOKED LIKE. `#activate`'s generic arm mints, for a `seq` or
   // `conditional` edge into the join node at the ROOT coordinate, the SAME TaskId

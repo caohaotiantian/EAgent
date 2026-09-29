@@ -710,3 +710,61 @@ for (const par of [1, 2, 4]) {
     assert.ok(log.indexOf("y") >= 0 && log.indexOf("y") < log.indexOf("deploy"), JSON.stringify(log));
   });
 }
+
+// ── 11 · one asker: a member's commit never releases a barrier ──────────────
+
+/**
+ * `start→m` beside `start→a0→a→m`, `m,a0 -join-> J1 → g0 → g1 → y`, and `y,x -join-> J2 → deploy`
+ * with `start→x`. After `a` commits, J1 is settled but has no Task; `x` commits in the same wave.
+ * While a second asker ran at the MEMBER's commit, x's own commit released J2 — nothing live
+ * reached `y`, because `y` sits behind the unreleased J1 — and `deploy` ran without `y` at
+ * maxParallelism 2 (lane K's fourth reviewer). With `#releaseSettledBarriers` the only asker, J1
+ * releases first and is a live holder of `y`'s path when J2 is asked. The `conditional` variant
+ * (`a→m` not taken) is the same shape reached with no arrival at all; on base it released J2
+ * early at par 2 and stranded both barriers at par 4 and 16.
+ */
+for (const conditional of [false, true]) {
+  for (const par of [1, 2, 4, 16]) {
+    test(`11 · a barrier behind an unreleased barrier waits for it${conditional ? " — a→m not taken" : ""} (maxParallelism ${par})`, async () => {
+      const ids = ["start", "a0", "a", "m", "g0", "g1", "y", "x", "deploy"];
+      const spec = graphSpec(
+        "chained-member-commit",
+        ids.map((id) => fn(id)),
+        [
+          ["sm", "start", "m"],
+          ["sa0", "start", "a0"],
+          ["a0a", "a0", "a"],
+          ["am", "a", "m", ...(conditional ? ["conditional"] : [])] as [string, string, string, string?],
+          ["j1g", "J1", "g0"],
+          ["g01", "g0", "g1"],
+          ["g1y", "g1", "y"],
+          ["sx", "start", "x"],
+          ["j2d", "J2", "deploy"],
+        ],
+      ) as unknown as { nodes: unknown[]; edges: unknown[] };
+      spec.nodes.push(
+        { id: n("J1"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("m"), n("a0")], mode: "all", onBranchError: "skip" } },
+        { id: n("J2"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("y"), n("x")], mode: "all", onBranchError: "skip" } },
+      );
+      spec.edges.push(
+        { id: "jm", from: n("m"), to: n("J1"), kind: "join", branches: [n("m"), n("a0")] },
+        { id: "ja0", from: n("a0"), to: n("J1"), kind: "join", branches: [n("m"), n("a0")] },
+        { id: "jy", from: n("y"), to: n("J2"), kind: "join", branches: [n("y"), n("x")] },
+        { id: "jx", from: n("x"), to: n("J2"), kind: "join", branches: [n("y"), n("x")] },
+      );
+      const store = new MemoryStateStore({ now: () => NOW });
+      const engine = engineFor(store, ids, {}, par);
+      const graph = compileOrThrow({ spec: spec as unknown as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+      const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+      const p = await engine.advance(runId);
+      assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+      const j = await journal(store, runId);
+      const at = (type: string, taskId: string): number => j.find((ev) => ev.type === type && ev.taskId === taskId)?.seq ?? -1;
+      assert.ok(at("task.committed", "y@root#0") > 0, "y never ran");
+      assert.ok(at("task.committed", "y@root#0") < at("task.ready", "J2@root#0"), "J2 released before its member y arrived");
+      assert.equal(rows(j, "task.committed", "deploy@root#0"), 1);
+      const log = p.outputs?.["log"] as string[];
+      assert.ok(log.indexOf("y") < log.indexOf("deploy"), `deploy ran before y: ${JSON.stringify(log)}`);
+    });
+  }
+}

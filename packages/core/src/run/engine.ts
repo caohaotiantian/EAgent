@@ -8367,8 +8367,8 @@ export class Engine {
     // Two people said no and the graph behind the barrier carried on. This project's own lens
     // names that shape: a guard answering its undecidable case with the passing value.
     //
-    // HERE AND NOT IN `#maybeFireJoin`, which is the division of labour §A.55 settled:
-    // `#maybeFireJoin` decides WHEN a barrier releases, this method decides what the release
+    // HERE AND NOT IN `#releaseSettledBarriers`, which is the division of labour §A.55 settled:
+    // `#releaseSettledBarriers` decides WHEN a barrier releases, this method decides what the release
     // MEANS, and the arm directly above is the other half of the same judgement.
     //
     // MEMBER TASKS AND NOT `branchCount`, AND THAT UNIT IS THE WHOLE CORRECTNESS OF THIS ARM.
@@ -8398,7 +8398,7 @@ export class Engine {
     // `#fireEmptyJoin` exists for it (§A.47) — and it materialises NO member Task, so this
     // barrier has nothing to have succeeded and folds and succeeds exactly as before, measured in
     // all four modes. It is the member set and NOT the fan-out plan, which is why this arm holds
-    // no second copy of `#maybeFireJoin`'s `expected` arithmetic: a plan whose branches were
+    // no second copy of `#releaseSettledBarriers`'s `expected` arithmetic: a plan whose branches were
     // never materialised at all is `#finish`'s unmaterialised-branch net, which fails the run
     // `E_INTERNAL` naming the fan-out, and duplicating that judgement here would be the drift
     // `#escalateSkippedGate` already paid for once.
@@ -8428,7 +8428,7 @@ export class Engine {
     // AND `terminalWork === workMembers` IS NOT BELT-AND-BRACES — IT IS WHAT MAKES THIS AN
     // ANSWERABLE QUESTION, and the first cut of §A.67 shipped without it and broke working runs.
     //
-    // A BARRIER CAN RELEASE WHILE A WORK MEMBER IS STILL LIVE. `#maybeFireJoin` short-circuits
+    // A BARRIER CAN RELEASE WHILE A WORK MEMBER IS STILL LIVE. `#releaseSettledBarriers` short-circuits
     // WITHOUT quiescence, on purpose — "QUIESCENCE GATES THE 'NO' ANSWERS, NOT THE 'YES' ONES":
     // `any` and `firstSuccess` on `succeeded >= 1`, `quorum` on `succeeded >= need` (where
     // `need = k <= 1 ? ceil(k * expected) : k`). On a STATIC join an approved gate can be that
@@ -8443,7 +8443,7 @@ export class Engine {
     // The run failed WITH the worker's own writes already in the channel, under a message saying it
     // did no work. That is this project's own lens pointed the other way: a guard answering a
     // question whose answer could still change. "Not one succeeded" is an ABSENCE claim, and an
-    // absence claim needs quiescence exactly as `#maybeFireJoin`'s two do.
+    // absence claim needs quiescence exactly as `#releaseSettledBarriers`'s two do.
     //
     // THE FIRST CUT'S COMMENT SAID THE SHAPE WAS NOT KNOWN TO BE REACHABLE, having had three
     // attempts refused by the compiler (`GRAPH021_FANOUT_WITHOUT_JOIN` twice,
@@ -8539,7 +8539,7 @@ export class Engine {
 
     // AND A `quorum` BARRIER IS FOLDED AGAINST ITS OWN `k`. §A.75.
     //
-    // `#maybeFireJoin` releases every mode once no further arrival is possible — that is §A.55's
+    // `#releaseSettledBarriers` releases every mode once no further arrival is possible — that is §A.55's
     // answer and it is right, because a barrier nothing can still reach must not hang. But a
     // release taken on "nothing more can arrive" carries no claim that the mode's requirement was
     // MET, and this method held two arms that could notice — `onBranchError === "fail" && skipped
@@ -8563,7 +8563,7 @@ export class Engine {
     // is re-derived here.
     //
     // AND THE COUNT IS `contributed`, NOT `succeeded`, WHICH IS THE ONE JUDGEMENT IN THIS ARM.
-    // `succeeded` is arrivals AT the barrier: `#maybeFireJoin` excludes a member that handed off
+    // `succeeded` is arrivals AT the barrier: `#releaseSettledBarriers` excludes a member that handed off
     // inside the branch set, so a branch whose earlier member wrote and whose later member then
     // threw counts zero. Requiring `k` of THOSE refuses three shapes this runtime decided to fold
     // — a degraded fan branch (`join-all-branches-fail.test.ts`), a `human_gate` answered `edit`
@@ -8582,7 +8582,7 @@ export class Engine {
     //
     // AND THE MESSAGE MAKES NO CLAIM ABOUT WHICH RELEASE BRANCH FIRED, which the first draft did
     // ("the barrier released because no further arrival is possible"). This method cannot know that:
-    // `#maybeFireJoin` returns a `task.ready` row carrying no reason, and the two sides count
+    // `#releaseSettledBarriers` returns a `task.ready` row carrying no reason, and the two sides count
     // different units — the release counts ARRIVALS and this arm counts branches that PRODUCED — so
     // a short-circuit release can reach here in principle and the sentence would be false when it
     // did. What the message says instead is the rule, which is true on every path: `k` is a floor
@@ -11269,7 +11269,7 @@ export class Engine {
 
     // A BRANCH A JOIN ABSORBS IS SKIPPED, NOT FAILED — and this is the second of the two exits
     // that say so. AFTER the commit above, because the fold applies these in order and `skipped`
-    // has to be the last word on this Task's state; `#foldJoin` and `#maybeFireJoin` both already
+    // has to be the last word on this Task's state; `#foldJoin` and `#releaseSettledBarriers` both already
     // treat `skipped` exactly as they treat `failed`, so nothing the join counts moves.
     if (outcome.status === "failed") {
       events.push(...this.#skippedByJoin(ctx, w, outcome.error?.code ?? CODES.E_INTERNAL, take));
@@ -11315,7 +11315,7 @@ export class Engine {
 
     // Activation is part of the same append: a crash between "committed" and "next
     // task ready" would otherwise strand the run with nothing runnable.
-    events.push(...this.#activate(ctx, routing, w, take, outcome, outcome.status === "failed" ? "failed" : "succeeded"));
+    events.push(...this.#activate(ctx, routing, w, take, outcome));
 
     // PRESENT THE LEASE. The store refuses an append whose token is below the highest it
     // has seen for this Task, so a worker whose lease another process has taken cannot
@@ -11993,36 +11993,19 @@ export class Engine {
     w: Wave,
     take: readonly EdgeId[],
     outcome: NodeOutcome,
-    selfStatus: "succeeded" | "failed",
   ): NewEvent[] {
     const events: NewEvent[] = [];
     const scope = { ...scopeFor(p, ctx.graph.spec.channels, w.task.branch), ...outcome.writes };
 
-    // ONE MINT PER BARRIER PER WAVE. `#maybeFireJoin` stands down on `p.tasks[joinTaskId]`, and
-    // `p` predates every event in this array — so two entrances reaching one barrier inside a
-    // single `#activate` both see an empty slot and both mint it.
-    //
-    // THE COLLISION IS BETWEEN THE TWO ARMS OF THE TAKE LOOP, not between the loop and the
-    // termination sweep, and the distinction is worth writing down because the first draft of
-    // this comment got it backwards. When a member carries both a `join` and an ordinary edge to
-    // the same join, BOTH are in `take` — so the sweep at the bottom skips the join edge
-    // (`take.includes(e.id)`) and never runs. The two mints come from the join arm and the
-    // generic arm of the loop below, on the member whose commit is the one that satisfies the
-    // barrier. Driven on a static sibling join whose LAST arm carries an extra `seq` edge to the
-    // join (it must be the last: an earlier arm does not satisfy the barrier, so neither arm
-    // fires and there is nothing to suppress) — `task.ready` rows for `J@root#0`, before this
-    // guard and after: **2 → 1**. Behind a fan-out that same shape does not compile
-    // (`GRAPH008_JOIN_DEPTH`, `GRAPH010_CONCURRENT_WRITE`), so a static join is the whole of the
-    // reachable set today. `test/run/join-seq-entrance.test.ts` pins it.
-    //
-    // `#fireEmptyJoin` guards its own array the same way and for the same reason; this is that
-    // rule at the three call sites that share one array, rather than at each exit — see `#fence`
-    // on why a rule per exit is a rule the fourth exit forgets.
-    const pushJoin = (fired: NewEvent | undefined): void => {
-      if (fired === undefined) return;
-      if (events.some((x) => x.taskId === fired.taskId)) return;
-      events.push(fired);
-    };
+    // A COMMIT MINTS NO BARRIER TASK — §A.101. Every join releases in `#releaseSettledBarriers`, between
+    // waves, from the projection AFTER every commit so far, one barrier node per pass, the most
+    // upstream first. There used to be a second asker here, at the member's commit, reading the
+    // projection BEFORE its own append; it could not see Tasks minted in that append or a barrier
+    // upstream that was settled and not yet released, so it released a downstream barrier early
+    // (measured: `m,a0 -join-> J1 → g0 → g1 → y`, `y,x -join-> J2 → deploy` — `deploy` never saw
+    // `y` at maxParallelism 2). Two askers on two projections cannot agree by construction; one
+    // asker on one projection can. The only barrier this method still mints is the empty fan's,
+    // `#fireEmptyJoin`, which no member Task will ever exist to be counted for.
 
     for (const edgeId of take) {
       const e = ctx.index.edgeById.get(edgeId);
@@ -12062,16 +12045,11 @@ export class Engine {
         continue;
       }
 
-      if (e.kind === "join") {
-        pushJoin(this.#maybeFireJoin(ctx, p, w, e, selfStatus, take));
-        continue;
-      }
-
       // A BARRIER'S TASK IS THE BARRIER'S TO MINT, whatever kind of edge arrives at it.
       //
       // Without this the arm below minted `task.ready` for `e.to` from the EDGE ALONE — no node
       // type, no `p.tasks` lookup, no barrier state — and for a Task at the join's own parent
-      // coordinate the id it computed was byte-identical to `#maybeFireJoin`'s. So a `seq` or
+      // coordinate the id it computed was byte-identical to the barrier's own. So a `seq` or
       // `conditional` edge into a join node did one of two things, and which one depended on
       // `maxParallelism` and on the hop counts of the two paths:
       //
@@ -12093,14 +12071,14 @@ export class Engine {
       // `test/run/join-seq-entrance.test.ts` is the sweep.
       //
       // THE SET THIS ARM COVERS, named rather than asserted, over all seven `EdgeKind`s:
-      // `fanout` and `join` are handled above and never reach here; `compensation` cannot be in
+      // `fanout` is handled above; `join` is skipped by the line below; `compensation` cannot be in
       // `take` at all (`untakeableMessage` refuses it, and `#edgesToTake` never selects one);
       // `loop` is excluded just below. So it is exactly `seq`, `conditional` and `error` — and
       // `error` belongs here, since a failure routed at a join node is an arrival like any
       // other and was minting the barrier's Task the same way.
       //
       // `loop` is deliberately NOT routed here. It mints at `iteration + 1`, which is a Task the
-      // barrier never owns, so folding it into `#maybeFireJoin` would turn a back-edge into a
+      // barrier never owns, so skipping it here like the others would turn a back-edge into a
       // silent no-op rather than closing a hole. Measured on
       // `start -fanout(2)-> A -join-> J -seq-> mid -loop-> J`, which compiles with only
       // `warning/GRAPH002_DEAD_END`: the loop's second pass is `J@root#1`, a DISTINCT id from
@@ -12110,15 +12088,12 @@ export class Engine {
       // pre-existing and on no row.) A `loop` edge that is NOT a back-edge — `X -loop-> J`
       // beside the fan-out — never reaches the engine: `GRAPH006_STUCK_LOOP` refuses it.
       //
-      // `#fireEmptyJoin` is deliberately NOT routed here either, and that is the trap: the
-      // planner's own `take` still holds the `fanout` edge whose `to` is a declared member, so
-      // `handingOff` is true and `quiescent` never becomes true — an empty fan would strand
-      // instead of releasing. A barrier over zero branches needs `#maybeFireJoin` to be TOLD the
-      // fan planned nothing; it is not a call-site swap.
-      if (e.kind !== "loop" && ctx.index.byId.get(e.to)?.join !== undefined) {
-        pushJoin(this.#maybeFireJoin(ctx, p, w, e, selfStatus, take));
-        continue;
-      }
+      // WHAT THE ARM DOES NOW: nothing. The edge is an arrival `#releaseSettledBarriers` counts
+      // between waves; the barrier's Task is that method's to mint, and no other. (`#fireEmptyJoin`
+      // still mints directly: a fan of width zero leaves no member Task for the pass to find.)
+      // (`e.kind === "join"` belongs to the same rule; a join edge whose `to` is not a join node
+      // does not compile, so that half is defensive and no test can reach it.)
+      if (e.kind === "join" || (e.kind !== "loop" && ctx.index.byId.get(e.to)?.join !== undefined)) continue;
 
       // The iteration counter PROPAGATES through the loop body and only increments on
       // the back-edge. Resetting it to 0 on a forward edge made the second pass
@@ -12152,14 +12127,6 @@ export class Engine {
     // losing a branch.
     events.push(...this.#topUpFanout(ctx, p, w));
 
-    // A join is notified by TERMINATION, not by edge selection. A failed branch takes
-    // no outgoing edge, but it still counts toward the barrier — otherwise a fan-out
-    // whose last branch fails would hang forever waiting for an arrival that can
-    // never come.
-    for (const e of ctx.index.outbound.get(w.node.id) ?? []) {
-      if (e.kind !== "join" || take.includes(e.id)) continue;
-      pushJoin(this.#maybeFireJoin(ctx, p, w, e, selfStatus, take));
-    }
     return events;
   }
 
@@ -12235,7 +12202,7 @@ export class Engine {
       //     order the journal can justify, so two concurrent branches are unwound interleaved.
       //     A range therefore cannot express "this branch", and the scope has to become a
       //     branch-path prefix over the recording `taskId`. That is `run/compensation.ts`.
-      //  2. A TRIGGER POINT EARLIER THAN THE BARRIER. By the time `#maybeFireJoin` counts the
+      //  2. A TRIGGER POINT EARLIER THAN THE BARRIER. By the time `#releaseSettledBarriers` counts the
       //     failed branch, `#commit` has applied its writes, so the rollback belongs in the
       //     commit of the failing Task — before the join is notified, not after it folds.
       //  3. A FOURTH ANSWER FROM THIS METHOD. `skip` needs only "contained: yes". `compensate`
@@ -12418,7 +12385,7 @@ export class Engine {
 
     // FROM THE SNAPSHOT'S BRANCH INDEX, not a scan. This built `encodeBranch(...)` for every task
     // in the run on every branch commit — 3,200 string builds per commit at 3,200 branches, four
-    // times over between here and `#maybeFireJoin`, and 24% of that run's CPU. The index groups
+    // times over between here and the barrier's commit-time asker (since removed), and 24% of that run's CPU. The index groups
     // tasks by their parent path once per snapshot; what is left is the siblings themselves.
     const siblings = (branchIndexOf(p).byParentPath.get(parentPath) ?? []).filter((t) => t.nodeId === plan.nodeId);
     const materialised = siblings.length;
@@ -12448,7 +12415,7 @@ export class Engine {
   /**
    * THE ARRIVAL ARITHMETIC A BARRIER'S MODE IS DECIDED ON — one function, two consumers.
    *
-   * `#maybeFireJoin` asks it to decide WHEN a barrier releases; `#foldJoin` asks it to decide
+   * `#releaseSettledBarriers` asks it to decide WHEN a barrier releases; `#foldJoin` asks it to decide
    * whether the mode's own requirement was actually met by what arrived. §A.75 is what happens
    * when only the first asks: `quorum` released on `succeeded >= need || noMoreArrivals` and the
    * fold never re-checked `k`, so a barrier that released because nothing more could arrive
@@ -12461,17 +12428,16 @@ export class Engine {
    * either by eye would answer a different question from the one the release was taken on. So the
    * two read the same function and "they agree" is true by construction.
    *
-   * `self` IS THE COMMITTING TASK'S OUTCOME, which `p` predates: `#maybeFireJoin` passes it so
-   * the arriving task is counted once rather than once as still-running and once as finished.
-   * `#foldJoin` passes none — by the time the barrier's own Task runs, every member it is
-   * counting has committed.
+   * BOTH READ A PROJECTION EVERY COUNTED MEMBER HAS ALREADY COMMITTED INTO. There was a `self`
+   * parameter for a commit-time asker reading the projection BEFORE the member's own append; that
+   * asker is gone (§A.101), and with it the substitution.
    *
    * TWO SUCCESS COUNTS, AND THE DIFFERENCE BETWEEN THEM IS A DECISION AND NOT AN OVERSIGHT.
    * `succeeded` is ARRIVALS — a member that handed off inside the branch set is excluded, because
    * its branch is still being handled and firing on it discards the recovery. `contributed` is
    * BRANCHES THAT PRODUCED SOMETHING, in the unit `expected` is denominated in: coordinates where
    * the members are fanned out, member tasks where they are static sibling arms, which is
-   * `expected`'s own rule. `#maybeFireJoin` needs the first — it is deciding whether another
+   * `expected`'s own rule. `#releaseSettledBarriers` needs the first — it is deciding whether another
    * arrival could still change the answer. `#foldJoin` reads the second, and the reason is
    * `onBranchError: "skip"`: a branch whose earlier member wrote and whose later member then died
    * is a branch `skip` folds ON PURPOSE (§A.67, §D.9), so counting it as nothing at the fold would
@@ -12493,7 +12459,6 @@ export class Engine {
     p: RunProjection,
     join: JoinNode,
     parent: BranchCoordinate,
-    self?: { readonly taskId: TaskId; readonly status: "succeeded" | "failed"; readonly take: readonly EdgeId[] },
   ): { readonly succeeded: number; readonly contributed: number; readonly terminal: number; readonly expected: number } {
     // Members are the DECLARED branch nodes under or at this instance's coordinate — the
     // same set `#foldJoin` folds. Counting one set and folding another is the shape
@@ -12524,10 +12489,8 @@ export class Engine {
     //
     // `join.branches` already carries this: an edge to a node NOT in that set is an
     // arrival at the join; an edge to a node inside it is a continuation.
-    //
-    // This Task's own hand-off is not in `p` yet, so read it from `self.take`.
-    const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
-      (t.taskId === self?.taskId ? self.take : t.take).some((id) => {
+    const continuesInBranch = (t: { take: readonly string[] }): boolean =>
+      t.take.some((id) => {
         const to = ctx.index.edgeById.get(id as EdgeId)?.to;
         return to !== undefined && members.has(to);
       });
@@ -12537,7 +12500,7 @@ export class Engine {
     let succeeded = 0;
     let terminal = 0;
     for (const t of siblings) {
-      const state = t.taskId === self?.taskId ? self.status : t.state;
+      const state = t.state;
       if (state === "succeeded") {
         producedAt.add(encodeBranch(t.branch));
         succeededTasks++;
@@ -12547,167 +12510,6 @@ export class Engine {
       if (isTerminalTaskState(state)) terminal++;
     }
     return { succeeded, contributed: planned > 0 ? producedAt.size : succeededTasks, terminal, expected };
-  }
-
-  /**
-   * Decide whether a join's barrier is satisfied. The join Task is created at the
-   * PARENT branch — that is what "a join collapses branches back to one instance"
-   * means concretely.
-   *
-   * `edge` IS NOT NECESSARILY A `join` EDGE, AND `w` IS NOT NECESSARILY A MEMBER. `#activate`
-   * routes every `seq`, `conditional` and `error` edge whose target is a join node here too, so
-   * that an ordinary edge cannot mint the barrier's Task behind its back. Such a caller is asking
-   * "is the barrier satisfiable right now?", not announcing an arrival — it contributes nothing
-   * to the counts `#joinArrivals` returns, and the answer is almost always `undefined`, because
-   * the member edges have already fired the barrier by the time it gets here. `edge` is read for
-   * `edge.to` (the join node) and for `edgesIn` on the row; nothing else about its kind is used,
-   * which is what makes the extra callers safe.
-   *
-   * THE INVARIANT IS A PROPERTY OF THE PROJECTION, NOT OF WHICH TASK COMMITTED. A barrier
-   * instance (a join node at a parent coordinate) releases when at least one member Task exists
-   * there, and `barrierReleases` holds on the counts `#joinArrivals` reads — where "quiescent"
-   * means no Task at or under the parent in a LIVE state (anything `isTerminalTaskState` says is
-   * not over) belongs to a node that is, or statically reaches, a member. That question has two
-   * askers, and neither alone is enough:
-   *
-   *   - THIS METHOD, at a member's commit, from the projection BEFORE it with the member's own
-   *     outcome and `take` substituted. It answers early — in the same append as the member — and
-   *     it is where every barrier on base released. But it cannot see Tasks this append mints, so
-   *     it stands down whenever it is unsure, and it is asked at no other instant.
-   *   - `#releaseSettledBarriers`, between waves, from the projection AFTER every commit so far
-   *     — this append's mints and every absorbed arrival included. It catches the barriers this
-   *     method stood down on and nothing afterwards asked again (§A.101).
-   */
-  #maybeFireJoin(
-    ctx: RunContext,
-    p: RunProjection,
-    w: Wave,
-    edge: EdgeSpec,
-    selfStatus: "succeeded" | "failed",
-    take: readonly EdgeId[] = [],
-  ): NewEvent | undefined {
-    const joinNode = ctx.index.byId.get(edge.to);
-    const join = joinNode?.join;
-    if (join === undefined) return undefined;
-
-    // WHICH INSTANCE OF THIS BARRIER the arriving branch belongs to comes from the
-    // GRAPH, not from the arriving task's own depth. `slice(0, -1)` answers "one level
-    // up from whoever just arrived", so two arms at different fan-out depths computed
-    // different parents and minted several instances of one barrier. The compiled
-    // fan-out depth is the same for every arm — `GRAPH008_JOIN_DEPTH` refuses the graphs
-    // where it would not be.
-    const depth = ctx.index.fanoutDepth.get(edge.to) ?? Math.max(0, w.task.branch.segments.length - 1);
-    if (depth > w.task.branch.segments.length) return undefined;
-    const parent: BranchCoordinate = { segments: w.task.branch.segments.slice(0, depth) };
-    const parentPath = encodeBranch(parent);
-    const joinTaskId = makeTaskId(edge.to, parent, 0);
-    if (p.tasks[joinTaskId] !== undefined) return undefined; // already fired
-    // A RUN BOUND TO FAIL ON A NON-MEMBER RELEASES NOTHING — see `#failingOutside`. Measured on
-    // `start→m1` beside `start→x(throws)→m2`, `m1,m2 -join-> J -seq-> deploy`, at `maxParallelism`
-    // 1 and 4, on `e59a969a`: x failed, m1's commit found nothing live and released, and `deploy`
-    // committed in a run that then ended `failed`. PRE-EXISTING; `deployCommitted` 1 → 0.
-    if (this.#failingOutside(ctx, p, join)) return undefined;
-
-    // THE ARRIVAL COUNTS, AND THEY ARE `#foldJoin`'S TOO — see `#joinArrivals`. `p` predates
-    // this Task's own commit, so its outcome is substituted there rather than counted twice,
-    // once as still-running and once as finished.
-    const { succeeded, terminal, expected } = this.#joinArrivals(ctx, p, join, parent, {
-      taskId: w.task.taskId,
-      status: selfStatus,
-      take,
-    });
-
-    // QUIESCENCE: a barrier may not fire while an arrival is still possible.
-    //
-    // `terminal >= expected` counts what has ALREADY arrived, which is only the right
-    // question when every member is a direct fan-out target. With a fan-out inside a
-    // fan-out, the outer join's declared `innerJoin` members have not been created yet
-    // when the outer branches finish — so the barrier fired over an empty member set and
-    // committed nothing, and the result depended on how many branches a wave happened to
-    // hold. A node still reaches a member if it IS one or is one of its ancestors.
-    // Memoised per node for this decision: the question is asked once per live task under the
-    // barrier, and its answer depends on the graph alone.
-    const reaches = new Map<NodeId, boolean>();
-    const reachesMember = (nodeId: NodeId): boolean => {
-      const hit = reaches.get(nodeId);
-      if (hit !== undefined) return hit;
-      const out = join.branches.some((bn) => bn === nodeId || (ctx.index.ancestors.get(bn as NodeId)?.has(nodeId) ?? false));
-      reaches.set(nodeId, out);
-      return out;
-    };
-
-    // This Task's own hand-off is not in `p` yet, so read it from `take`.
-    const handingOff = take.some((id) => {
-      const to = ctx.index.edgeById.get(id)?.to;
-      return to !== undefined && reachesMember(to);
-    });
-    const stillLive = branchIndexOf(p).all.some((t) => {
-      if (t.taskId === w.task.taskId) return false;
-      if (isTerminalTaskState(t.state)) return false;
-      if (!isAtOrUnderBranch(t.branch, parent)) return false;
-      return reachesMember(t.nodeId);
-    });
-    const quiescent = !handingOff && !stillLive;
-
-    // QUIESCENCE GATES THE "NO" ANSWERS, NOT THE "YES" ONES.
-    //
-    // A mode that short-circuits does so on EVIDENCE ALREADY IN HAND — one success is one
-    // success whether or not siblings are still running, and that is the whole reason to
-    // ask for `any` rather than `all`. Only the conclusions that rest on ABSENCE need
-    // quiescence: "every branch is in" and "the quorum can no longer be met" are both
-    // claims about arrivals that will never come, and both were wrong before, because
-    // `terminal >= expected` counted what had arrived rather than asking whether more
-    // could. Gating the whole decision instead of just those two collapsed `any`,
-    // `firstSuccess` and `quorum` into `all`: they released at exactly the same point.
-    //
-    // AND EVERY MODE NEEDS THE "NEVER" ANSWER, WHICH IS WHAT `noMoreArrivals` NAMES.
-    // `any` and `firstSuccess` were `succeeded >= 1` alone — a predicate with no false
-    // branch that terminates. Once every member is terminal and none succeeded it is
-    // permanently false, so the barrier never minted its Task, everything behind the join
-    // never ran, and `#finish` still called the run `succeeded`, because nothing was left
-    // in a live state to object. Measured on `start -fanout(2)-> b0 -join-> J -seq-> done`
-    // over a body that always throws, `onBranchError: "skip"`, `outputs: []` — `any` and
-    // `firstSuccess` read `Jready=0 done=0 status=succeeded` where `all` and `quorum` read
-    // `Jready=1 done=1`. (`outputs: []` is load-bearing in that probe: a declared output
-    // nothing writes fails the run `E_OUTPUT_MISSING`, which hides the "says it worked"
-    // half.)
-    //
-    // RELEASING IS THE ANSWER, NOT FAILING HERE, and the reason is that the outcome
-    // already has an owner. `#maybeFireJoin` decides WHEN a barrier releases; `#foldJoin`
-    // decides what the release MEANS, and it holds BOTH failure arms —
-    // `onBranchError === "fail" && skipped > 0`, and since §D.9's answer a barrier not one of whose
-    // WORK members succeeded — `succeededWork === 0 && terminalWork === workMembers`, §A.67, with
-    // `members.length > 0` still separating an empty fan from an emptied one. THE SECOND CONJUNCT
-    // IS THERE BECAUSE OF THIS METHOD: the short-circuit above releases WITHOUT quiescence, so the
-    // fold can be handed a member set still holding a live task, and "not one succeeded" is an
-    // absence claim that needs the same quiescence the two "no" answers here need. Without it a
-    // barrier released on an approved gate failed a run whose worker then succeeded and wrote.
-    // Both arms return `E_QUORUM_UNREACHABLE`.
-    // So all four modes short-circuit on evidence in hand and otherwise release once no
-    // further arrival is possible.
-    //
-    // A RELEASE THAT THE FOLD THEN REFUSES IS NOT THE SAME JUDGEMENT TWICE, and the
-    // distinction is why this stayed a release rather than becoming a failure here. This
-    // predicate answers "can another arrival change the answer?" from the SIBLING set,
-    // `p.fanouts` and quiescence — evidence about the future. The fold answers "is what
-    // arrived worth folding?" from the MEMBER TASKS and their writes, which this method never
-    // reads and which are not final until the barrier's own Task runs (lazy materialisation
-    // tops the fan up in between, so an early mint still folds every member that commits
-    // meanwhile — see the short-circuit test). Computing the verdict here would read a
-    // different set, at an earlier instant, and get a different answer.
-    //
-    // WHAT IT NO LONGER SAYS, because §D.9 answered it: that an empty fold's worth is the
-    // operator's call. `onBranchError: "skip"` still absorbs every loss short of the last one,
-    // but a barrier not one of whose members succeeded is refused whatever it says.
-    const fire = barrierReleases(join, { succeeded, terminal, expected, quiescent });
-
-    if (!fire) return undefined;
-    return {
-      type: "task.ready",
-      payload: { nodeId: edge.to, branchPath: parentPath, edgesIn: [edge.id] },
-      actor: SYSTEM_ACTOR("scheduler"),
-      taskId: joinTaskId,
-    };
   }
 
   // ── run completion ────────────────────────────────────────────────────────
@@ -12915,53 +12717,48 @@ export class Engine {
   }
 
   /**
-   * Release every barrier the projection says is settled and nothing has released — §A.101.
+   * THE ONE PLACE A BARRIER RELEASES — every join except a fan of width zero (`#fireEmptyJoin`).
    *
-   * WHY IT EXISTS. `#maybeFireJoin` is asked only at a member's commit and stands down while any
-   * live Task could still reach a member. When that holder later ended WITHOUT arriving, nothing
-   * asked again, the barrier never released, and `#finish` called the run `succeeded` with the
-   * work behind the join never done. Two ways a holder ends like that, both measured on
-   * `start→m` beside `start→a→a1→a2→m`, `m -join-> J -seq-> done`, at `maxParallelism: 4`:
+   * THE INVARIANT, AS A PROPERTY OF ONE PROJECTION. A barrier instance — a join node at a parent
+   * coordinate — releases when (a) at least one MEMBER Task exists at or under that parent,
+   * (b) `barrierReleases` holds on the counts `#joinArrivals` reads, with "quiescent" meaning no
+   * Task at or under the parent in a LIVE state (anything `isTerminalTaskState` says is not over)
+   * belongs to a node that is, or statically reaches, a member, and (c) the run is not bound to
+   * fail on a NON-member (`#failingOutside`). All three are read off the projection AFTER every
+   * commit so far, at the top of each pass of the drive loop, before "nothing is ready, finish".
    *
-   *   - its path is not taken (a `conditional` false) — PRE-EXISTING on `e59a969a`;
-   *   - its arrival is ABSORBED (`#activate`'s generic arm writes no arrival at an existing Task).
-   *     Before §A.101 that arrival RE-RAN the member, and the member's second commit is what
-   *     asked the barrier again.
+   * WHY ONE ASKER — §A.101, and three measured failures of having two. Until then a barrier was
+   * asked at a MEMBER's commit, from the projection BEFORE that member's append, and nowhere else:
    *
-   * WHY HERE AND NOT AT THE COMMIT. A first attempt re-asked from the committing non-member, from
-   * the projection BEFORE its append — which cannot see the Tasks that append mints (an inner
-   * join's release, `#topUpFanout`'s next branch). It released outer barriers of nested fan-outs
-   * early and lost a branch's contributions (10 of 48 configurations). This reads the projection
-   * AFTER every commit so far, at the top of each pass of the drive loop, so every mint is in it.
-   * And because it is a pure function of the fold, a crash between a commit and this append costs
-   * nothing: the next `advance` — any process, any restart — asks again and gets the same answer.
-   *
-   * WHAT IT RELEASES, named:
-   *   - an instance only where at least one MEMBER Task exists at or under its parent. A barrier
-   *     no member ever reached — the only member behind a `conditional` not taken — does NOT
-   *     release, as on base. (A fan of width zero is `#fireEmptyJoin`'s, and mints directly.)
-   *   - only when `barrierReleases` holds with `quiescent` read off the post-commit projection —
-   *     the same counts, the same mode rule, the same live-reaches-a-member test
-   *     `#maybeFireJoin` applies.
-   *   - nothing while the run is bound to fail on a NON-member (`#failingOutside`, which
-   *     `#maybeFireJoin` asks too): releasing would start the work behind the barrier in a run
-   *     `#finish` is about to fail.
+   *   - A holder that ended WITHOUT arriving was never re-asked, so the barrier stranded and the
+   *     run said `succeeded` with the work behind it undone — its path not taken (a `conditional`
+   *     false, PRE-EXISTING on `e59a969a`), or its arrival ABSORBED (`#activate` writes no arrival
+   *     at an existing Task; before §A.101 that arrival re-ran the member, whose second commit is
+   *     what asked again). `start→m` beside `start→a→a1→a2→m`, `m -join-> J -seq-> done`, par 4.
+   *   - Re-asking from the committing non-member, still from the projection BEFORE its append,
+   *     could not see what that append minted (an inner join's release, `#topUpFanout`'s next
+   *     branch) and released outer barriers of nested fan-outs early: 10 of 48 configurations lost
+   *     a branch.
+   *   - Keeping the commit-time asker beside this pass let it release a barrier DOWNSTREAM of one
+   *     this pass had not yet released — settled, no Task, so neither live nor counted:
+   *     `m,a0 -join-> J1 → g0 → g1 → y`, `y,x -join-> J2 → deploy` committed `deploy` without `y`
+   *     at par 2.
    *
    * ONE BARRIER NODE PER PASS, THE MOST UPSTREAM FIRST — the same rule applied to this method's own
-   * output. Every decision here must read a projection that holds every mint before it, and that
-   * includes the ones this method makes: deciding two barriers from one projection let a barrier
-   * DOWNSTREAM of another release in the same append, its member behind the first one having no
-   * Task yet and so counting as neither live nor expected (measured: `start→m` beside
-   * `start→a→a1→a2→m`, `m -join-> J1 -seq-> y`, `y,x -join-> J2 -seq-> deploy` — `J2` released
-   * beside `J1` and `deploy` never saw `y`, at `maxParallelism` 2 and 4). So the join nodes are taken
-   * in ancestry order (a join's ancestor set strictly contains every upstream join's), only the
-   * first node with anything to release releases, and the drive loop re-projects before asking
-   * again — where that release is a `ready` Task, live, and holds everything behind it. All
-   * instances of that one node go together: they sit at distinct parent coordinates of one
-   * barrier, none upstream of another.
+   * output. Deciding two barriers from one projection let a downstream one release beside an
+   * upstream one in the same append (`m -join-> J1 -seq-> y`, `y,x -join-> J2 -seq-> deploy`, par 2
+   * and 4). So join nodes are taken in ancestry order (a join's ancestor set strictly contains
+   * every upstream join's, over the dag edges), only the first node with anything to release
+   * releases, and the drive loop re-projects — where that release is a `ready` Task, live, holding
+   * everything behind it. All instances of that one node go together: they sit at distinct parent
+   * coordinates of one barrier, none upstream of another.
    *
-   * It releases the barrier's iteration-0 Task, as `#maybeFireJoin` does; a join inside a loop
-   * keying every pass at `#0` is pre-existing and on no row this change closes.
+   * RESTART-SAFE BY CONSTRUCTION: a pure function of the fold, so a crash between a commit and this
+   * append costs nothing — the next `advance`, in any process, asks again and gets the same answer.
+   *
+   * WHAT IT DOES NOT RELEASE: a barrier no member ever reached (the only member behind a
+   * `conditional` not taken) — as on base. It releases the barrier's iteration-0 Task; a join
+   * inside a loop keying every pass at `#0` is pre-existing and on no row this change closes.
    */
   #releaseSettledBarriers(ctx: RunContext, p: RunProjection): NewEvent[] {
     const joins = [...ctx.index.byId.values()]
@@ -12980,8 +12777,10 @@ export class Engine {
       const reaches = (id: NodeId): boolean =>
         join.branches.some((bn) => bn === id || (ctx.index.ancestors.get(bn as NodeId)?.has(id) ?? false));
 
-      // THE INSTANCES THAT EXIST: the parent coordinate of every member Task, found the way
-      // `#maybeFireJoin` finds it — from the graph's fan-out depth, not the Task's own depth.
+      // THE INSTANCES THAT EXIST: the parent coordinate of every member Task, from the graph's
+      // fan-out depth and not the Task's own — `slice(0, -1)` answered "one level up from whoever
+      // arrived", so arms at different depths minted several instances of one barrier;
+      // `GRAPH008_JOIN_DEPTH` refuses the graphs where the compiled depth would differ per arm.
       const parents = new Map<string, BranchCoordinate>();
       for (const t of all) {
         if (!members.has(t.nodeId)) continue;
@@ -13315,7 +13114,7 @@ const VERDICT_SCHEMA: JSONSchema = {
  * How many branches a `quorum` join needs, from `k` and the width it was planned over.
  *
  * THE ONE PREDICATE, ASKED FROM BOTH SIDES — the same rule `writesHeldForJoin` lives on, and
- * §A.75 is the bill for not having had it here. `#maybeFireJoin` asks "may this barrier release?"
+ * §A.75 is the bill for not having had it here. `#releaseSettledBarriers` asks "may this barrier release?"
  * and `#foldJoin` asks "did what arrived meet the requirement it released under?", and a `need`
  * computed twice is a `need` that can be computed differently: `k <= 1` is a FRACTION of the
  * width and anything above it is an absolute count, and nothing about that is obvious enough to
@@ -13329,11 +13128,61 @@ function quorumNeed(join: JoinNode, expected: number): number {
 /**
  * Whether a barrier with these counts releases — THE ONE MODE RULE, for its two askers.
  *
- * `#maybeFireJoin` asks at a member's commit, from the projection before it plus the member's own
- * outcome; `#releaseSettledBarriers` asks between waves, from the projection after every commit
- * so far. They must never disagree about what the counts MEAN, so the switch is here once. Every
- * mode short-circuits on evidence in hand; the answers resting on ABSENCE ("every branch is in")
- * need `quiescent` — see `#maybeFireJoin` for why.
+ * Asked by `#releaseSettledBarriers` alone, between waves, from the projection after every commit
+ * so far — there was a second asker at the member's commit until §A.101, and two askers on two
+ * projections could not agree (see that method). Every mode short-circuits on evidence in hand;
+ * the answers resting on ABSENCE ("every branch is in") need `quiescent`.
+ *
+ * QUIESCENCE GATES THE "NO" ANSWERS, NOT THE "YES" ONES.
+ *
+ * A mode that short-circuits does so on EVIDENCE ALREADY IN HAND — one success is one
+ * success whether or not siblings are still running, and that is the whole reason to
+ * ask for `any` rather than `all`. Only the conclusions that rest on ABSENCE need
+ * quiescence: "every branch is in" and "the quorum can no longer be met" are both
+ * claims about arrivals that will never come, and both were wrong before, because
+ * `terminal >= expected` counted what had arrived rather than asking whether more
+ * could. Gating the whole decision instead of just those two collapsed `any`,
+ * `firstSuccess` and `quorum` into `all`: they released at exactly the same point.
+ *
+ * AND EVERY MODE NEEDS THE "NEVER" ANSWER, WHICH IS WHAT `noMoreArrivals` NAMES.
+ * `any` and `firstSuccess` were `succeeded >= 1` alone — a predicate with no false
+ * branch that terminates. Once every member is terminal and none succeeded it is
+ * permanently false, so the barrier never minted its Task, everything behind the join
+ * never ran, and `#finish` still called the run `succeeded`, because nothing was left
+ * in a live state to object. Measured on `start -fanout(2)-> b0 -join-> J -seq-> done`
+ * over a body that always throws, `onBranchError: "skip"`, `outputs: []` — `any` and
+ * `firstSuccess` read `Jready=0 done=0 status=succeeded` where `all` and `quorum` read
+ * `Jready=1 done=1`. (`outputs: []` is load-bearing in that probe: a declared output
+ * nothing writes fails the run `E_OUTPUT_MISSING`, which hides the "says it worked"
+ * half.)
+ *
+ * RELEASING IS THE ANSWER, NOT FAILING HERE, and the reason is that the outcome
+ * already has an owner. `#releaseSettledBarriers` decides WHEN a barrier releases; `#foldJoin`
+ * decides what the release MEANS, and it holds BOTH failure arms —
+ * `onBranchError === "fail" && skipped > 0`, and since §D.9's answer a barrier not one of whose
+ * WORK members succeeded — `succeededWork === 0 && terminalWork === workMembers`, §A.67, with
+ * `members.length > 0` still separating an empty fan from an emptied one. THE SECOND CONJUNCT
+ * IS THERE BECAUSE OF THIS RULE: the short-circuit releases WITHOUT quiescence, so the
+ * fold can be handed a member set still holding a live task, and "not one succeeded" is an
+ * absence claim that needs the same quiescence the two "no" answers here need. Without it a
+ * barrier released on an approved gate failed a run whose worker then succeeded and wrote.
+ * Both arms return `E_QUORUM_UNREACHABLE`.
+ * So all four modes short-circuit on evidence in hand and otherwise release once no
+ * further arrival is possible.
+ *
+ * A RELEASE THAT THE FOLD THEN REFUSES IS NOT THE SAME JUDGEMENT TWICE, and the
+ * distinction is why this stayed a release rather than becoming a failure here. This
+ * rule answers "can another arrival change the answer?" from the SIBLING set,
+ * `p.fanouts` and quiescence — evidence about the future. The fold answers "is what
+ * arrived worth folding?" from the MEMBER TASKS and their writes, which this rule never
+ * reads and which are not final until the barrier's own Task runs (lazy materialisation
+ * tops the fan up in between, so an early mint still folds every member that commits
+ * meanwhile — see the short-circuit test). Computing the verdict here would read a
+ * different set, at an earlier instant, and get a different answer.
+ *
+ * WHAT IT NO LONGER SAYS, because §D.9 answered it: that an empty fold's worth is the
+ * operator's call. `onBranchError: "skip"` still absorbs every loss short of the last one,
+ * but a barrier not one of whose members succeeded is refused whatever it says.
  */
 function barrierReleases(
   join: JoinNode,
@@ -13379,8 +13228,8 @@ function writesHeldForJoin(branch: BranchCoordinate): boolean {
 /**
  * A Task state from which no further arrival is possible. THE ONE DEFINITION.
  *
- * It was a closure inside `#maybeFireJoin` and nowhere else, which was correct while that method
- * was the only place asking. §A.67's fold asks the same question — "can this member still arrive?"
+ * It was a closure inside the barrier's commit-time asker (`#maybeFireJoin`, removed by §A.101)
+ * and nowhere else, which was correct while that method was the only place asking. §A.67's fold asks the same question — "can this member still arrive?"
  * — and a second copy is the drift `writesHeldForJoin` above exists to prevent and that
  * `#escalateSkippedGate` already paid for once. One function, both callers.
  */
@@ -13442,7 +13291,7 @@ function isAtOrUnderBranch(branch: BranchCoordinate, parent: BranchCoordinate): 
  *
  * Three readers asked the same question of `p.tasks` in three passes per commit and one more per
  * executed task: which tasks sit AT this branch (`#withBranchWrites`), which sit one level UNDER
- * it (`#topUpFanout`), and which sit at or under it (`#maybeFireJoin`). Each pass built a string
+ * it (`#topUpFanout`), and which sit at or under it (`#releaseSettledBarriers`). Each pass built a string
  * per task to answer. The index encodes each task's path once and files it under its own path and
  * its parent's; readers then touch only the group they asked about, or `all` when the question is
  * genuinely about every task.

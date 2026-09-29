@@ -93,11 +93,15 @@ async function run(mode: "all" | "any"): Promise<Timing> {
     functions,
     models,
     now: () => 1_700_000_000_000,
-    // All three branches materialise and run in ONE wave, so when the first commits its
-    // siblings are live Tasks in the projection. That is what makes the difference
-    // observable: at `maxParallelism: 1` the siblings do not exist yet, every barrier is
-    // trivially quiescent, and `any` and `all` are indistinguishable for the wrong reason.
-    maxParallelism: 3,
+    // ONE BRANCH PER WAVE, so when the first commits its siblings are still to run. Since
+    // §A.101 a barrier releases BETWEEN waves, from the projection after every commit
+    // (`#releaseSettledBarriers`), and that projection holds `#topUpFanout`'s next branch as a
+    // live Task — so `any` releases after the first wave while its siblings are live, and `all`
+    // waits for the last. At `maxParallelism: 3` all three commit in one wave before anything is
+    // asked, and the two modes are indistinguishable for the wrong reason. (Before §A.101 the
+    // barrier was asked inside the member's commit, where the opposite held: par 3 separated the
+    // modes and par 1 did not.)
+    maxParallelism: 1,
     policy: { granted: [], budget: { runUsd: 1 } },
   });
 
