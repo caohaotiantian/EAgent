@@ -54,7 +54,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -511,6 +511,92 @@ test("PROMOTE --AGAINST-COHORT NAMES THE COHORT'S BROKEN GRAPH, NOT AN EMPTY POP
     // is: nothing else in this file drove a broken cohort graph through this verb.
     assert.doesNotMatch(text, /n = 0 comparable runs/, `must not fall back to the population refusal:\n${text}`);
     assert.doesNotMatch(text, /Record more runs of this workflow first/, `must not fall back to the population refusal:\n${text}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── §A.125 and §A.126 — what the by-hash refusal prints and carries, and when it speaks ──
+
+const BIDI = /[\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+test("EVERY STRING THE RESOLVER PRINTS OUT OF A FILE IS SANITISED — TODO.md §A.125", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "resources", "function", "pick.js"), PICK_FN);
+    writeFileSync(join(w.dir, "graphs", "g.json"), JSON.stringify(pickGraph({ name: "g", version: 1 })));
+    const started = await run(["run", join(w.dir, "graphs", "g.json"), "--workspace", w.dir, "--input", '{"items":[1]}']);
+    assert.equal(started.code, 0, started.err);
+    const { runId } = JSON.parse(started.out) as { runId: string };
+
+    // Three candidates, none the run's graph: (1) compiles to another hash, its NAME and its FILE
+    // NAME holding bidi controls and an ESC; (2) a surrogate-pair name long enough to be capped
+    // mid-pair; (3) invalid JSON whose parser message quotes the file's own bytes.
+    rmSync(join(w.dir, "graphs", "g.json"));
+    writeFileSync(join(w.dir, "graphs", "e\u202evil\u001b[31m.json"), JSON.stringify(pickGraph({ name: "na\u202e\u2066me", version: 2 })));
+    writeFileSync(join(w.dir, "graphs", "gg.json"), JSON.stringify(pickGraph({ name: "\u{1F600}".repeat(150), version: 3 })));
+    writeFileSync(join(w.dir, "graphs", "bad.json"), "not json \u202e\u2067 \u001b[31m tail");
+
+    const traced = await run(["trace", runId, "--workspace", w.dir]);
+    const text = traced.out + traced.err;
+    assert.notEqual(traced.code, 0, text);
+    assert.match(text, /no graph compiles to hash/, `the refusal itself must still print:\n${JSON.stringify(text)}`);
+    assert.doesNotMatch(text, BIDI, `a bidi control reached the terminal:\n${JSON.stringify(text)}`);
+    assert.equal(text.includes("\u001b"), false, `an ESC reached the terminal:\n${JSON.stringify(text)}`);
+    assert.doesNotMatch(text, LONE_SURROGATE, `the cap split a surrogate pair:\n${JSON.stringify(text)}`);
+    // Legible, not dropped: the harmless parts of all three still name their candidates.
+    assert.match(text, /evil\[31m\.json/);
+    assert.match(text, /bad\.json/);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("`exam attest` RESOLVES THE COHORT'S GRAPH BEFORE IT JUDGES THE EXAM — TODO.md §A.126", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "graphs", "sole.json"), JSON.stringify(SOLE_GRAPH));
+    const f = await soleRun(w.dir);
+    // NOT AN EXAM AT ALL — `examShape` refuses it. And the cohort's graph does not compile without
+    // the grant the run had, so the resolver refuses too. Only one can be said first; it must be
+    // the one that was true before the operator touched the exam.
+    writeFileSync(join(w.dir, "resources", "not-an-exam.json"), JSON.stringify(GOOD_GATED_GRAPH));
+    const attested = await run(["exam", "attest", join(w.dir, "resources", "not-an-exam.json"), "--cohort", f.runId, "--as", "u:alice", "--workspace", w.dir]);
+    const text = attested.out + attested.err;
+    assert.notEqual(attested.code, 0);
+    assert.match(text, /GRAPH017_CAPABILITY_NOT_GRANTED/, `the resolver's refusal must come first:\n${text}`);
+    assert.doesNotMatch(text, /is not an exam/, `the exam's shape must not mask it:\n${text}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE REFUSAL'S STRUCTURED DETAILS CARRY `searched`, THE DIRECTORIES ITS MESSAGE NAMES — TODO.md §A.126", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "graphs", "sole.json"), JSON.stringify(SOLE_GRAPH));
+    const f = await soleRun(w.dir);
+    const thrown = async (argv: string[]): Promise<{ message: string; details?: { searched?: unknown } }> => {
+      const errOut = process.stderr.write.bind(process.stderr);
+      process.stderr.write = (() => true) as typeof process.stderr.write;
+      try {
+        await main(argv);
+      } catch (e) {
+        return e as { message: string; details?: { searched?: unknown } };
+      } finally {
+        process.stderr.write = errOut;
+      }
+      throw new Error(`${argv.join(" ")} did not refuse`);
+    };
+    const searched = [join(w.dir, "graphs"), join(w.dir, "resources", "subgraph")].filter((d) => d === join(w.dir, "graphs") || existsSync(d));
+    const viaTrace = await thrown(["trace", f.runId, "--workspace", w.dir]);
+    assert.deepEqual(viaTrace.details?.searched, searched);
+    for (const d of searched) assert.ok(viaTrace.message.includes(d), `the message names ${d}`);
+
+    writeFileSync(join(w.dir, "resources", "exam.json"), JSON.stringify(EXAM));
+    const viaAttest = await thrown(["exam", "attest", join(w.dir, "resources", "exam.json"), "--cohort", f.runId, "--as", "u:alice", "--workspace", w.dir]);
+    assert.deepEqual(viaAttest.details?.searched, searched);
   } finally {
     w.dispose();
   }
