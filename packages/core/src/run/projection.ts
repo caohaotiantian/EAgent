@@ -1171,9 +1171,10 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     // a failure routed down its `error` arm then ran the success arm too, and a reader behind the
     // error arm read `"X:error"` as `{ok: true}`. Every such run reported `succeeded`.
     //
-    // NO WRITER RE-READIES A TERMINAL TASK ON PURPOSE. Of the engine's seven `task.ready` sites,
+    // NO WRITER RE-READIES A TERMINAL TASK ON PURPOSE. Of the engine's eight `task.ready` sites,
     // `rewind` re-arms only `leased` Tasks and `retry` only the Task it just moved to `retrying`;
-    // the rest mint Tasks. So the only row this refuses is an ARRIVAL, and the arrival is not
+    // the rest mint Tasks — the eighth, `#releaseSettledBarriers`, only a join Task that does not
+    // exist yet. So the only row this refuses is an ARRIVAL, and the arrival is not
     // lost — the sender's `task.committed.take` names the edge. A `loop` edge mints
     // `iteration + 1`, a different Task, so a back-edge still re-runs its target.
     //

@@ -12910,8 +12910,8 @@ export class Engine {
    * replace that verdict with the member's raw error. What this refuses is a NON-member's ending,
    * the holder path that failed with nothing to handle it.
    */
-  #failingOutside(ctx: RunContext, p: RunProjection, join: JoinNode): boolean {
-    return this.#failuresThatFailTheRun(ctx, p).some((t) => !join.branches.includes(t.nodeId));
+  #failingOutside(ctx: RunContext, p: RunProjection, join: JoinNode, failing = this.#failuresThatFailTheRun(ctx, p)): boolean {
+    return failing.some((t) => !join.branches.includes(t.nodeId));
   }
 
   /**
@@ -12924,8 +12924,9 @@ export class Engine {
    * `start→m` beside `start→a→a1→a2→m`, `m -join-> J -seq-> done`, at `maxParallelism: 4`:
    *
    *   - its path is not taken (a `conditional` false) — PRE-EXISTING on `e59a969a`;
-   *   - its arrival is ABSORBED (`#absorbsArrival`). Before §A.101 that arrival RE-RAN the
-   *     member, and the member's second commit is what asked the barrier again.
+   *   - its arrival is ABSORBED (`#activate`'s generic arm writes no arrival at an existing Task).
+   *     Before §A.101 that arrival RE-RAN the member, and the member's second commit is what
+   *     asked the barrier again.
    *
    * WHY HERE AND NOT AT THE COMMIT. A first attempt re-asked from the committing non-member, from
    * the projection BEFORE its append — which cannot see the Tasks that append mints (an inner
@@ -12946,17 +12947,35 @@ export class Engine {
    *     `#maybeFireJoin` asks too): releasing would start the work behind the barrier in a run
    *     `#finish` is about to fail.
    *
+   * ONE BARRIER NODE PER PASS, THE MOST UPSTREAM FIRST — the same rule applied to this method's own
+   * output. Every decision here must read a projection that holds every mint before it, and that
+   * includes the ones this method makes: deciding two barriers from one projection let a barrier
+   * DOWNSTREAM of another release in the same append, its member behind the first one having no
+   * Task yet and so counting as neither live nor expected (measured: `start→m` beside
+   * `start→a→a1→a2→m`, `m -join-> J1 -seq-> y`, `y,x -join-> J2 -seq-> deploy` — `J2` released
+   * beside `J1` and `deploy` never saw `y`, at `maxParallelism` 2 and 4). So the join nodes are taken
+   * in ancestry order (a join's ancestor set strictly contains every upstream join's), only the
+   * first node with anything to release releases, and the drive loop re-projects before asking
+   * again — where that release is a `ready` Task, live, and holds everything behind it. All
+   * instances of that one node go together: they sit at distinct parent coordinates of one
+   * barrier, none upstream of another.
+   *
    * It releases the barrier's iteration-0 Task, as `#maybeFireJoin` does; a join inside a loop
    * keying every pass at `#0` is pre-existing and on no row this change closes.
    */
   #releaseSettledBarriers(ctx: RunContext, p: RunProjection): NewEvent[] {
-    const out: NewEvent[] = [];
-    let all: readonly TaskRecord[] | undefined;
-    for (const node of ctx.index.byId.values()) {
-      const join = node.join;
-      if (join === undefined) continue;
-      if (this.#failingOutside(ctx, p, join)) continue;
-      all ??= branchIndexOf(p).all;
+    const joins = [...ctx.index.byId.values()]
+      .filter((node) => node.join !== undefined)
+      .sort((a, b) => (ctx.index.ancestors.get(a.id)?.size ?? 0) - (ctx.index.ancestors.get(b.id)?.size ?? 0));
+    if (joins.length === 0) return [];
+    const all = branchIndexOf(p).all;
+    // The live Tasks, once: in a settled run a handful, where `all` is every Task the run made.
+    const liveTasks = all.filter((t) => !isTerminalTaskState(t.state));
+    const failing = this.#failuresThatFailTheRun(ctx, p);
+    for (const node of joins) {
+      const join = node.join!;
+      if (this.#failingOutside(ctx, p, join, failing)) continue;
+      const out: NewEvent[] = [];
       const members = new Set<string>(join.branches);
       const reaches = (id: NodeId): boolean =>
         join.branches.some((bn) => bn === id || (ctx.index.ancestors.get(bn as NodeId)?.has(id) ?? false));
@@ -12975,8 +12994,10 @@ export class Engine {
       for (const [parentPath, parent] of parents) {
         const taskId = makeTaskId(node.id, parent, 0);
         if (p.tasks[taskId] !== undefined) continue;
+        const live = liveTasks.some((t) => isAtOrUnderBranch(t.branch, parent) && reaches(t.nodeId));
+        // `all` releases on quiescence alone, so a live holder answers it without the counts.
+        if (live && join.mode === "all") continue;
         const { succeeded, terminal, expected } = this.#joinArrivals(ctx, p, join, parent);
-        const live = all.some((t) => !isTerminalTaskState(t.state) && isAtOrUnderBranch(t.branch, parent) && reaches(t.nodeId));
         if (!barrierReleases(join, { succeeded, terminal, expected, quiescent: !live })) continue;
         const entrance = (ctx.index.inbound.get(node.id) ?? []).find((e) => e.kind === "join");
         out.push({
@@ -12986,8 +13007,9 @@ export class Engine {
           taskId,
         });
       }
+      if (out.length > 0) return out;
     }
-    return out;
+    return [];
   }
 
   async #failRun(ctx: RunContext, p: RunProjection, error: ErrorRecord): Promise<void> {

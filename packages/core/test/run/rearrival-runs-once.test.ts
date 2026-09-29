@@ -669,3 +669,44 @@ test("9 · a barrier whose holder is still awaiting a person does not release wh
   assert.ok(released !== undefined && m2 !== undefined && m2.seq < released.seq, "the barrier released before m2 arrived");
   assert.deepEqual(p.outputs?.["log"], ["start", "m1", "g1after", "m2", "done"]);
 });
+
+// ── 10 · two barriers in a chain: the downstream one waits for the upstream ─
+
+/**
+ * `start→m` beside `start→a→a1→a2→m`, `m -join-> J1 -seq-> y`, and `y, x -join-> J2 -seq-> deploy`.
+ * When a2 ends, J1 is settled — and so, read off the same projection, is J2: its member `y` sits
+ * behind J1 and has no Task, so it is neither live nor expected. A pass that released both from
+ * one projection committed J2 before `y` ran, and `deploy` never saw it (found by lane K's third
+ * reviewer, at maxParallelism 2 and 4). Released one node at a time, upstream first, J2 is asked
+ * again only once J1's release is a live Task holding `y`'s path.
+ */
+for (const par of [1, 2, 4]) {
+  test(`10 · a barrier behind another barrier is not released in the same pass (maxParallelism ${par})`, async () => {
+    const spec = graphSpec(
+      "chained-barriers",
+      ["start", "a", "a1", "a2", "m", "x", "y", "deploy"].map((id) => fn(id)),
+      [["sm", "start", "m"], ["sa", "start", "a"], ["aa1", "a", "a1"], ["a1a2", "a1", "a2"], ["a2m", "a2", "m"], ["sx", "start", "x"], ["j1y", "J1", "y"], ["j2d", "J2", "deploy"]],
+    ) as unknown as { nodes: unknown[]; edges: unknown[] };
+    spec.nodes.push(
+      { id: n("J1"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("m")], mode: "all", onBranchError: "skip" } },
+      { id: n("J2"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("y"), n("x")], mode: "all", onBranchError: "skip" } },
+    );
+    spec.edges.push(
+      { id: "jm", from: n("m"), to: n("J1"), kind: "join", branches: [n("m")] },
+      { id: "jy", from: n("y"), to: n("J2"), kind: "join", branches: [n("y"), n("x")] },
+      { id: "jx", from: n("x"), to: n("J2"), kind: "join", branches: [n("y"), n("x")] },
+    );
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = engineFor(store, ["start", "a", "a1", "a2", "m", "x", "y", "deploy"], {}, par);
+    const graph = compileOrThrow({ spec: spec as unknown as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+    const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+    const p = await engine.advance(runId);
+    assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+    const j = await journal(store, runId);
+    const j2 = j.find((ev) => ev.type === "task.ready" && ev.taskId === "J2@root#0");
+    const y = j.find((ev) => ev.type === "task.committed" && ev.taskId === "y@root#0");
+    assert.ok(j2 !== undefined && y !== undefined && y.seq < j2.seq, "J2 released before its member y arrived");
+    const log = p.outputs?.["log"] as string[];
+    assert.ok(log.indexOf("y") >= 0 && log.indexOf("y") < log.indexOf("deploy"), JSON.stringify(log));
+  });
+}
