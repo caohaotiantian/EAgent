@@ -1122,11 +1122,7 @@ function fsGlob(opts: BuiltinOptions): ToolDefinition {
       matches.sort();
       return {
         content:
-          matches.length === 0
-            ? "(no matches)"
-            : capped
-              ? `${matches.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} files; narrow the pattern to see more)`
-              : matches.join("\n"),
+          matches.length === 0 ? "(no matches)" : matches.join("\n"),
         details: { pattern: String(args["pattern"]), count: matches.length, truncated: capped },
       };
     },
@@ -1276,11 +1272,7 @@ function fsGrep(opts: BuiltinOptions): ToolDefinition {
 
       return {
         content:
-          hits.length === 0
-            ? "(no matches)"
-            : capped
-              ? `${hits.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} matches; narrow the search to see more)`
-              : hits.join("\n"),
+          hits.length === 0 ? "(no matches)" : hits.join("\n"),
         details: { pattern: String(args["pattern"]), count: hits.length, truncated: capped },
       };
     },
