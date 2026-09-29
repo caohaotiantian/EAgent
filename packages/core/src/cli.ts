@@ -2481,7 +2481,7 @@ export function openWorkspace(
     // them would be inherited object and all. It is absent because every caller passes a
     // hand-built literal instead. THE THREE, named because the guarantee is their conjunction and
     // not one refusal: `case "replay"` below (`tools, functions, models, hooks, policy,
-    // payloads`), `agent.ts`'s `engineOptions`, and `evolution/gate.ts`'s `replayRun`, which
+    // payloads, resolver`), `agent.ts`'s `engineOptions`, and `evolution/gate.ts`'s `replayRun`, which
     // forwards whatever ITS caller gave — for the CLI, the literal built in `case "promote"`.
     // A fourth that spread `ws.engine`'s own options would hand a replay this scheduler.
     scheduler: new InProcessScheduler({ strandedLeaseMs: STRANDED_LEASE_MS }),

@@ -230,3 +230,40 @@ test("A RUN THAT NEVER MUTATED still replays match: true — the resolver change
   assert.match(moved.err, /✗ graph\.bound\s*: expected function\/f@stable=/, moved.err);
 });
 
+test("promote --suite OVER RECORDINGS THAT ADOPTED A MUTATION-ADDED function: the BASELINE reproduces them", async (t) => {
+  // `promote --suite` replays each recording against the baseline and the candidate, through the
+  // same `replayRun` `loom replay` uses — so without the workspace resolver the baseline's shadow
+  // could not resolve the ref the recorded mutation added, failed GRAPH015 on every case, and the
+  // decision was made against a 0% baseline that measured the replayer, not the graph.
+  const w = workspace(t, { withFunction: true, moduleResolver: false });
+  const ids: string[] = [];
+  for (let i = 0; i < 3; i++) ids.push(await recordApproved(w));
+  const suiteFile = join(w.dir, "suite.json");
+  writeFileSync(
+    suiteFile,
+    JSON.stringify({
+      name: "mutated-bench",
+      version: 1,
+      frozen: true,
+      frozenAt: 1_000,
+      generatedBy: "maintainer",
+      cases: ids.map((runId, i) => ({ id: `c${String(i)}`, runId, mustPass: i === 0, expect: { status: "succeeded" } })),
+      composition: { minCases: 3, minMustPass: 1 },
+    }),
+  );
+  // A candidate that differs from the baseline only in its version, so its hash is its own.
+  mkdirSync(join(w.dir, "candidates"), { recursive: true });
+  const candidate = join(w.dir, "candidates", "mutable-v2.json");
+  writeFileSync(candidate, JSON.stringify({ ...GRAPH, metadata: { ...GRAPH.metadata, version: 2 } }));
+
+  const r = await cli(["promote", candidate, "--baseline", join(w.dir, "graphs", "mutable.json"), "--suite", suiteFile, ...w.flags]);
+  const decision = JSON.parse(r.out.slice(r.out.indexOf("{"))) as {
+    baseline: { passRate: number };
+    checks: { id: string; pass: boolean; detail: string }[];
+  };
+  assert.equal(decision.baseline.passRate, 1, `every baseline case reproduces its recording: ${r.err}`);
+  const mustPass = decision.checks.find((c) => c.id === "1-must-pass");
+  assert.equal(mustPass?.pass, true, JSON.stringify(mustPass));
+  assert.equal(r.code, 0, `${JSON.stringify(decision.checks.filter((c) => !c.pass))}\n${r.err}`);
+});
+
