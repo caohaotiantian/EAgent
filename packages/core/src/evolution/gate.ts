@@ -128,6 +128,16 @@ export interface CaseResult {
    * word rather than on bytes is a different claim, and a reader of the report should see which.
    */
   readonly certified?: readonly { readonly channel: string; readonly grader: string; readonly taskId: string }[];
+  /**
+   * PRESENT ONLY WHEN THE REPLAY THREW — so `replay` is absent — and the recording could be read:
+   * whether the graph this case replayed IS the one it was recorded with, by SPEC hash
+   * (`run.submitted.graphHash` against the replayed graph's). `2-non-inferior` needs it to tell "the
+   * baseline could not reproduce its own recording" from "the operator chose another baseline
+   * graph" on a case with no report to ask (§A.NEW-2). Refs are not compared here — a thrown replay
+   * leaves no manifest binding — so a moved resource under an unchanged spec reads as the recorded
+   * graph, which is the strict direction for that rule.
+   */
+  readonly recordedGraph?: { readonly recorded: string; readonly replayed: string; readonly match: boolean };
   readonly costUsd: number;
   readonly wallMs: number;
   /**
@@ -347,6 +357,7 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
   try {
     report = await replayRun({ store: opts.store, runId: c.runId, graph: opts.graph, engine: opts.engine });
   } catch (e) {
+    const recordedHash = await submittedGraphHash(opts.store, c.runId);
     return {
       id: c.id,
       pass: false,
@@ -354,6 +365,9 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
       // A candidate that no longer consumes the recorded effects has failed the
       // regression suite; it has not merely errored.
       reasons: [`replay failed: ${(e as Error).message}`],
+      ...(recordedHash === undefined
+        ? {}
+        : { recordedGraph: { recorded: recordedHash, replayed: opts.graph.graphHash, match: recordedHash === opts.graph.graphHash } }),
       costUsd: 0,
       wallMs: 0,
     };
@@ -440,7 +454,9 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  *      `reads`, `threshold` — and the frozen SITE (`graderSite`: its whole `NodeSpec`, every edge
  *      leaving it, which is what its `ctx.node` is built from, and the `ChannelSpec` of every channel
  *      it reads, which with the fold's state is what its view is built from). It ran as exactly one Task,
- *      at iteration 0 — its `ctx.taskId`, and the seed and clock keyed on it, are the recording's. No gate
+ *      at iteration 0 — its `ctx.taskId`, and the seed and clock keyed on it, are the recording's —
+ *      as a realm body the runtime vouched for (absent from `ReplayReport.liveBodies`), so the
+ *      digest bound at freeze is the digest of what ran. No gate
  *      was raised on it and no hook changed it (a gate decided with `edit` and
  *      a `preNode` skip both commit `succeeded` with writes no body produced), and the graph did not
  *      mutate before it committed. Its OWN commit — never the final `verdict` channel, which a later
@@ -465,6 +481,16 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * WHAT IT CERTIFIES IS EXACTLY WHAT THE GRADER CHECKS. A grader that asserts only a length
  * certifies any value of that length; its strength is the operator's, who named it at freeze —
  * the same division of labour as the attested exam, one level down.
+ *
+ * RESIDUE, named. (a) `12-grader-unchanged` has the module-only blind spot condition 1 closes here
+ * and does NOT close it: it compares the same resolved digest, so a grader whose body a module
+ * registered — digest of its own ref string — reads "unchanged" whatever the module now registers.
+ * A candidate cannot reach that (modules come from argv, the operator's), but an operator who swaps
+ * a module between freeze and promote is not told. (b) `liveBodies` is the runtime's word that a
+ * body is realm-branded, not that it was compiled from THIS digest's content: a module that builds
+ * a realm body from other source (`createFunctionLoader` over its own store) and registers it under
+ * the grader's ref is branded and passes. That is operator-authored code again — `CLAUDE.md` §3's
+ * first assumption — and it is where this certificate stops.
  */
 function certification(
   channel: string,
@@ -504,6 +530,19 @@ function certification(
     if (task.iteration !== 0) {
       return no(`${scope} ran at iteration ${String(task.iteration)}, so its task id, seed and clock are not the ones the recording served`);
     }
+    // THE DIGEST MUST BIND THE BODY THAT RAN. The identity above compares the digest the grader's
+    // ref RESOLVED to, which is the digest of a resource's CONTENT — and a body registered by a
+    // module (`--extension-module`) is not that content: `openWorkspace` seeds a module-only ref
+    // with its own NAME as content, so its "resolved digest" is the digest of a ref string, the
+    // same at freeze and at promote whatever the module registers. Driven by the lane's
+    // coordinator: freeze with the honest `check`, re-register `function/check@stable` as an
+    // always-pass closure, candidate `pick-empty` → `promote: true`. The fact that separates the
+    // two is the runtime's own: a body loaded from a resource runs in the realm, is branded, and
+    // is absent from `ReplayReport.liveBodies`; host code is named there (`Engine.#functionBody`
+    // records it at fetch). So a grader in `liveBodies` certifies nothing.
+    if (report.liveBodies.includes(String(task.taskId))) {
+      return no(`${scope}'s body ran as host code the runtime cannot vouch for, so the digest the freeze bound is not the body that ran`);
+    }
     const served = servedTo(report.replayedEvents, task.taskId, now.reads, specs);
     if (!served.decidable) return no(`what ${scope} was served is undecidable: ${served.reason}`);
     const intervened = report.replayedEvents.find(
@@ -537,6 +576,16 @@ function certification(
     by.push({ grader: scope, taskId: String(task.taskId) });
   }
   return { ok: true, by };
+}
+
+/** The spec hash a recording was submitted with, or `undefined` when its journal cannot say. */
+async function submittedGraphHash(store: StateStore, runId: RunId): Promise<string | undefined> {
+  try {
+    for await (const e of store.read(runId, 1)) if (isEvent(e, "run.submitted")) return e.payload.graphHash;
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -889,24 +938,33 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
   const delta = input.candidate.passRate - input.baseline.passRate;
   // THE BAR IS NOT LOWERED BY WHAT NOBODY MEASURED (§A.NEW-2). The baseline's pass rate is the
   // number a candidate must not fall below, and every case the BASELINE fails lowers it. A baseline
-  // case that FAILED while its replay did not reproduce its own recording — the replay threw, came
-  // back `match: false`, or ran a graph that is not the one recorded — failed for a reason not
-  // established to be the baseline's quality. So the bar counts each such case as one the baseline
-  // PASSED: the strictest bar consistent with not knowing, which never lowers it.
+  // case that failed because its replay could not reproduce ITS OWN RECORDING failed for a reason
+  // not established to be the baseline's quality — so the bar counts it as one the baseline PASSED:
+  // the strictest bar consistent with not knowing, which never lowers it.
   //
-  // THREE ANSWERS WERE AVAILABLE AND THIS IS THE FAIL-CLOSED ONE THAT STILL DECIDES. Refusing
-  // outright on any such case turns the check off for a candidate that clears even the strictest bar
-  // — `test/cli/promote.test.ts` drives one: a `--baseline` re-postured after recording, every
-  // baseline replay refused, a candidate at 100% — and a guard that refuses what it could have
-  // decided is the one nobody can satisfy. Excluding the cases changes the denominator on one side
-  // only, and quietly. Counting them as baseline passes can only make `2-non-inferior` harder.
+  // THE FACT THIS KEYS ON IS "THE BASELINE GRAPH IS THE RECORDED ONE, AND THE REPLAY STILL DIVERGED".
+  // The first version keyed on `graph.match` being false too, and that is not evidence of anything:
+  // `graph.match` is false on EVERY case, by construction, whenever the operator passes a
+  // `--baseline` other than the graph the corpus was recorded with — and then every failed baseline
+  // case became a pass, so a candidate EQUAL to that baseline was refused where it had promoted
+  // (the coordinator's review of lane F: `50.0% vs baseline 50.0%`, bar 100.0%, refused). A graph
+  // the operator CHOSE differs because they chose it; its failures are measurements of that graph.
+  // So the set is: failed, on the recorded graph (`replay.graph.match`, or for a replay that threw,
+  // `recordedGraph.match` by spec hash), and not reproduced (`match: false`, or thrown). The
+  // alternative — keying on the non-graph divergence frames — was rejected: on a different graph
+  // those frames diverge BECAUSE the graph differs, which is the same confusion one level down.
   //
-  // THE SET IS "FAILED AND UNREPRODUCED". A baseline case that PASSED holds the bar up whatever its
-  // replay says — that is the ordinary `--baseline` that is not byte-for-byte the recorded graph. A
-  // baseline case that failed with `match: true` on the recorded graph reproduced its recording and
-  // failed anyway: that is a real bar, and counts as it is.
+  // NOT A REFUSAL, AND NOT AN EXCLUSION. Refusing outright turns the check off for a candidate that
+  // clears even the strictest bar; excluding changes one side's denominator quietly. Counting the
+  // case as a baseline pass can only make `2-non-inferior` harder, and only on these cases.
   const unreproduced = input.baseline.cases
-    .filter((k) => !k.pass && (k.replay === undefined || !k.replay.match || !k.replay.graph.match))
+    .filter((k) =>
+      k.pass
+        ? false
+        : k.replay !== undefined
+          ? k.replay.graph.match && !k.replay.match
+          : k.recordedGraph?.match === true,
+    )
     .map((k) => k.id);
   const bar =
     unreproduced.length === 0 || input.baseline.total === 0

@@ -5,7 +5,7 @@
  *
  * WHAT NEWLY PASSES, stated as the set so the tests below can be read against it: a golden case
  * whose pinned channel C DIFFERS from the recording, when every grader the freeze named that reads C
- * is unchanged (identity AND site), ran as one Task on the root branch with no gate, hook or
+ * is unchanged (identity AND site), ran as one realm-loaded Task at iteration 0 on the root branch with no gate, hook or
  * earlier mutation touching it, committed its own verdict(s) all `pass === true` and none below
  * threshold, and was served — per the kernel fold of the replay's shadow journal — the value of C
  * the run ENDED with and the RECORDED value of every other channel it reads. Nothing else changed:
@@ -21,7 +21,7 @@
  *   G   the restore trick against the topology the reverted pin RECOMMENDED — grader reads one
  *       produced channel, the ground truth is a declared graph input.
  *
- * Offline and deterministic: `function` / `evaluator{assertion}` bodies registered in-process, one
+ * Offline and deterministic: `function` / `evaluator{assertion}` bodies published as resources and loaded through the realm (one host closure, in F1, on purpose), one
  * mock model in the mutation test, no clock ratio.
  */
 
@@ -40,74 +40,75 @@ import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from 
 import { evaluatorIdentities, graderSite } from "../../src/run/served.ts";
 import { gateCandidate, runEvalSuite, type EvalCase, type EvalReport, type EvalSuite } from "../../src/evolution/gate.ts";
 import { resolver } from "../run/skeleton.ts";
+import type { ResourceResolver } from "../../src/graph/validate.ts";
+import { ResourceStore } from "../../src/resources/store.ts";
+import { createFunctionLoader } from "../../src/resources/functions.ts";
 
 const NOW = 1_700_000_000_000;
-const SAME = (a: unknown, b: unknown): boolean =>
-  JSON.stringify([...((a as string[] | undefined) ?? [])].sort()) === JSON.stringify([...((b as string[] | undefined) ?? [])].sort());
-
 // ── the bodies ───────────────────────────────────────────────────────────────
 
-function functions(): FunctionRegistry {
-  const f = new FunctionRegistry();
-  const items = (v: { get<T>(c: string): T | undefined }): string[] => v.get<string[]>("items") ?? [];
+/**
+ * Every body PUBLISHED as a resource and loaded through the realm (`createFunctionLoader`), the way
+ * `loom` loads `resources/function/*.js` — so the digest a grader's identity carries is the digest
+ * of the body that runs, and `ReplayReport.liveBodies` is empty. A body registered by hand is host
+ * code the runtime cannot vouch for; the F1 test below registers one on purpose.
+ */
+const PRE = `const items = (v) => v.get("items") ?? []; const same = (a, b) => JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());`;
+const body = (expr: string): string => `(v, ctx) => { ${PRE} ${expr} }`;
+const BODIES: Record<string, string> = {
   // the work
-  f.register("function/pick@stable", (v) => ({ writes: { picked: items(v).slice() } }));
-  f.register("function/pick-rev@stable", (v) => ({ writes: { picked: items(v).slice().reverse() } }));
-  f.register("function/pick-drop@stable", (v) => ({ writes: { picked: items(v).slice(1) } }));
-  f.register("function/pick-empty@stable", () => ({ writes: { picked: [] } }));
+  pick: body(`return { writes: { picked: items(v).slice() } };`),
+  "pick-rev": body(`return { writes: { picked: items(v).slice().reverse() } };`),
+  "pick-drop": body(`return { writes: { picked: items(v).slice(1) } };`),
+  "pick-empty": body(`return { writes: { picked: [] } };`),
+  "pick-count": body(`return { writes: { picked: items(v).slice(1), rounds: (v.get("rounds") ?? 0) + 1 } };`),
   // the graders
-  f.register("function/check@stable", (v) => {
-    const ok = SAME(v.get("items"), v.get("picked"));
-    return { writes: { verdict: { pass: ok, confidence: 1 } } };
-  });
-  f.register("function/subset@stable", (v) => {
-    const ok = (v.get<string[]>("picked") ?? []).every((x) => items(v).includes(x));
-    return { writes: { verdict: { pass: ok, confidence: 1 } } };
-  });
+  check: body(`return { writes: { verdict: { pass: same(v.get("items"), v.get("picked")), confidence: 1 } } };`),
+  subset: body(`return { writes: { verdict: { pass: (v.get("picked") ?? []).every((x) => items(v).includes(x)), confidence: 1 } } };`),
   // A grader that spot-checks ONE item, chosen by its seed — so what it checks depends on `ctx`.
-  f.register("function/spot@stable", (v, ctx) => {
-    const it = items(v);
-    const i = Number((ctx as { seed?: number }).seed ?? 0) % Math.max(1, it.length);
-    const got = v.get<string[]>("picked") ?? [];
-    return { writes: { verdict: { pass: got.includes(it[i]!) && got.every((x) => it.includes(x)), confidence: 1 } } };
-  });
-  f.register("function/pick-count@stable", (v) => ({ writes: { picked: items(v).slice(1), rounds: (v.get<number>("rounds") ?? 0) + 1 } }));
-  f.register("function/check-rigged@stable", () => ({ writes: { verdict: { pass: true, confidence: 1 } } }));
-  f.register("function/order@stable", (v) => ({
-    writes: { order: { pass: JSON.stringify(v.get("picked") ?? []) === JSON.stringify(items(v)), confidence: 1 } },
-  }));
-  f.register("function/check-scored@stable", (v) => {
-    const ok = SAME(v.get("items"), v.get("picked"));
-    return { writes: { verdict: { pass: ok, score: ok ? 0.3 : 0 } } };
-  });
+  spot: body(`const it = items(v); const i = Number(ctx.seed ?? 0) % Math.max(1, it.length); const got = v.get("picked") ?? [];
+    return { writes: { verdict: { pass: got.includes(it[i]) && got.every((x) => it.includes(x)), confidence: 1 } } };`),
+  "check-rigged": body(`return { writes: { verdict: { pass: true, confidence: 1 } } };`),
+  order: body(`return { writes: { order: { pass: JSON.stringify(v.get("picked") ?? []) === JSON.stringify(items(v)), confidence: 1 } } };`),
+  "check-scored": body(`const ok = same(v.get("items"), v.get("picked")); return { writes: { verdict: { pass: ok, score: ok ? 0.3 : 0 } } };`),
   // A pass on one channel and a FAIL on another, the fail large enough to leave the journal.
-  f.register("function/check-split@stable", (v) => ({
-    writes: { verdict: { pass: true, confidence: 1 }, note: { pass: SAME(v.get("items"), v.get("picked")) && false, blob: "z".repeat(70_000) } },
-  }));
-  f.register("function/check-nopass@stable", (v) => ({ writes: { verdict: { ok: SAME(v.get("items"), v.get("picked")) } } }));
-  f.register("function/check-truth@stable", (v) => {
-    const ok = SAME(v.get("truth"), v.get("answer"));
-    return { writes: { verdict: { pass: ok, confidence: 1 } } };
-  });
-  f.register("function/check-fixture@stable", (v) => {
-    const ok = SAME(v.get("expected"), v.get("picked"));
-    return { writes: { verdict: { pass: ok, confidence: 1 } } };
-  });
+  "check-split": body(`return { writes: { verdict: { pass: true, confidence: 1 }, note: { pass: false, blob: "z".repeat(70000) } } };`),
+  "check-nopass": body(`return { writes: { verdict: { ok: same(v.get("items"), v.get("picked")) } } };`),
+  "check-truth": body(`return { writes: { verdict: { pass: same(v.get("truth"), v.get("answer")), confidence: 1 } } };`),
+  "check-fixture": body(`return { writes: { verdict: { pass: same(v.get("expected"), v.get("picked")), confidence: 1 } } };`),
   // the games
-  f.register("function/stash-a@stable", (v) => ({ writes: { stash: items(v), items: ["GARBAGE"], picked: ["GARBAGE"] } }));
-  f.register("function/stash-a-prime@stable", (v) => ({ writes: { stash: items(v), items: [] } }));
-  f.register("function/restore@stable", (v) => ({ writes: { items: v.get("stash") ?? [] } }));
-  f.register("function/spoil@stable", () => ({ writes: { picked: ["GARBAGE"] } }));
-  f.register("function/tock@stable", () => ({ writes: { t: 1 } }));
-  f.register("function/answer@stable", (v) => ({ writes: { answer: items(v).slice() } }));
-  f.register("function/answer-rev@stable", (v) => ({ writes: { answer: items(v).slice().reverse() } }));
-  f.register("function/stash-g@stable", (v) => ({ writes: { stash: v.get("truth") ?? [], truth: ["GARBAGE"], answer: ["GARBAGE"] } }));
-  f.register("function/restore-g@stable", (v) => ({ writes: { truth: v.get("stash") ?? [] } }));
-  f.register("function/fixture@stable", (v) => ({ writes: { expected: items(v).slice() } }));
-  f.register("function/fixture-g@stable", () => ({ writes: { expected: ["GARBAGE"] } }));
-  f.register("function/report@stable", (v) => ({ writes: { rounds: (v.get<number>("rounds") ?? 0) + 1 } }));
-  f.register("function/after@stable", () => ({ writes: { t: 2 } }));
-  return f;
+  "stash-a": body(`return { writes: { stash: items(v), items: ["GARBAGE"], picked: ["GARBAGE"] } };`),
+  "stash-a-prime": body(`return { writes: { stash: items(v), items: [] } };`),
+  restore: body(`return { writes: { items: v.get("stash") ?? [] } };`),
+  spoil: body(`return { writes: { picked: ["GARBAGE"] } };`),
+  tock: body(`return { writes: { t: 1 } };`),
+  answer: body(`return { writes: { answer: items(v).slice() } };`),
+  "answer-rev": body(`return { writes: { answer: items(v).slice().reverse() } };`),
+  "stash-g": body(`return { writes: { stash: v.get("truth") ?? [], truth: ["GARBAGE"], answer: ["GARBAGE"] } };`),
+  "restore-g": body(`return { writes: { truth: v.get("stash") ?? [] } };`),
+  fixture: body(`return { writes: { expected: items(v).slice() } };`),
+  "fixture-g": body(`return { writes: { expected: ["GARBAGE"] } };`),
+  report: body(`return { writes: { rounds: (v.get("rounds") ?? 0) + 1 } };`),
+  after: body(`return { writes: { t: 2 } };`),
+};
+
+function published(): { resources: ResourceStore; functions: FunctionRegistry } {
+  const resources = new ResourceStore({ now: () => 1 });
+  const actor = { kind: "human", id: "u:test" } as const;
+  for (const [name, content] of Object.entries(BODIES)) {
+    const ref = resources.publish({ kind: "function", name, content, actor });
+    resources.promote(ref, "canary", actor);
+    resources.promote(ref, "stable", actor);
+  }
+  const functions = new FunctionRegistry();
+  const loader = createFunctionLoader({ store: resources });
+  for (const version of resources.list({ kind: "function" })) {
+    const ref = `function/${version.name}@stable`;
+    const fn = loader.load(ref);
+    assert.ok(fn !== undefined, `${ref} loads`);
+    functions.register(ref, fn);
+  }
+  return { resources, functions };
 }
 
 // ── the graphs ───────────────────────────────────────────────────────────────
@@ -185,7 +186,7 @@ interface Bench {
     functions: FunctionRegistry;
     models: ModelRegistry;
     hooks: HookRegistry;
-    resolver: ReturnType<typeof resolver>;
+    resolver: ResourceResolver;
     payloads: ReturnType<typeof memoryPayloads>;
     policy: { granted: string[]; systemFloor: "out" };
     now: () => number;
@@ -194,13 +195,18 @@ interface Bench {
 }
 
 function bench(opts: { granted?: string[]; models?: ModelRegistry } = {}): Bench {
-  const res = resolver();
+  const { resources, functions } = published();
+  const fallback = resolver();
+  const res: ResourceResolver = {
+    resolve: (ref) => resources.resolve(ref) ?? fallback.resolve(ref),
+    document: (pinned) => resources.document(pinned) ?? fallback.document?.(pinned),
+  };
   const store = new MemoryStateStore({ now: () => NOW });
   const hooks = new HookRegistry();
   const models = opts.models ?? new ModelRegistry();
   const engineOpts = {
     tools: new ToolRegistry(),
-    functions: functions(),
+    functions,
     models,
     hooks,
     resolver: res,
@@ -553,6 +559,27 @@ test("A GRADER REACHED ONLY AT ITERATION 1 certifies nothing — its task id and
   }
 });
 
+test("F1 · A GRADER WHOSE BODY IS HOST CODE (a module-registered body) certifies nothing — its digest does not bind what ran", async () => {
+  const b = bench();
+  const baseline = b.compile(keep());
+  const runs = await record(b, baseline);
+  const suite = freeze(baseline, runs);
+  // The coordinator's repro: after the freeze, `function/check@stable` is re-registered as an
+  // always-pass closure — what an `--extension-module` does to a module-only ref, whose "resolved
+  // digest" is the digest of its own name and so does not move. The candidate picks NOTHING.
+  b.engineOpts.functions.register("function/check@stable", () => ({ writes: { verdict: { pass: true, confidence: 1 } } }));
+  const r = await drive(b, suite, baseline, b.compile(keep({ pick: "function/pick-empty@stable" })));
+  graderSaidPass(r.cand);
+  for (const c of r.cand.cases) {
+    assert.ok(c.replay!.liveBodies.includes("check@root#0"), `${c.id}: the runtime says it cannot vouch for the grader`);
+    assert.deepEqual(c.replay!.replayed.channels["picked"], []);
+  }
+  refusedAll(r.cand, /node:check's body ran as host code the runtime cannot vouch for/);
+  assert.equal(r.verdict.promote, false);
+  // …and `12-grader-unchanged` does not see it: the digest it compares did not move (residue).
+  assert.equal(r.verdict.checks.find((c) => c.id === "12-grader-unchanged")!.pass, true);
+});
+
 test("A VERDICT BELOW THRESHOLD, NO VERDICT AT ALL, OR ONE THAT LEFT THE JOURNAL, certifies nothing", async () => {
   for (const [ref, why, extra] of [
     ["function/check-scored@stable", /passed it below its own threshold/, {}],
@@ -662,8 +689,9 @@ test("A GRAPH THAT MUTATED BEFORE THE GRADER COMMITTED certifies nothing — the
 
 // ── §A.NEW-2: the baseline's own bar ─────────────────────────────────────────
 
-test("A.NEW-2 · a BASELINE case that failed without reproducing its recording does not lower the bar — it counts as a baseline pass", () => {
-  const report = (cases: { pass: boolean; match: boolean; graphMatch: boolean }[]): EvalReport =>
+test("A.NEW-2 · a BASELINE case that failed because it could not reproduce ITS OWN RECORDING counts as a baseline pass; a baseline the operator CHOSE differently is measured as it is", () => {
+  type Row = { pass: boolean; match?: boolean; graphMatch?: boolean; threw?: boolean };
+  const report = (cases: Row[]): EvalReport =>
     ({
       suite: "s",
       suiteVersion: 1,
@@ -675,7 +703,9 @@ test("A.NEW-2 · a BASELINE case that failed without reproducing its recording d
         reasons: c.pass ? [] : ["x"],
         costUsd: 0,
         wallMs: 0,
-        replay: { match: c.match, graph: { match: c.graphMatch, recorded: "a", replayed: "b" } },
+        ...(c.threw === true
+          ? { recordedGraph: { recorded: "a", replayed: c.graphMatch === true ? "a" : "b", match: c.graphMatch === true } }
+          : { replay: { match: c.match ?? true, graph: { match: c.graphMatch ?? true, recorded: "a", replayed: c.graphMatch === false ? "b" : "a" } } }),
       })),
       passed: cases.filter((c) => c.pass).length,
       total: cases.length,
@@ -690,28 +720,63 @@ test("A.NEW-2 · a BASELINE case that failed without reproducing its recording d
     }) as unknown as EvalReport;
   const decide = (baseline: EvalReport, candidate: EvalReport) =>
     gateCandidate({ baseline, candidate, postureDiffNonNegative: true, deterministic: true }).checks.find((c) => c.id === "2-non-inferior")!;
-  const half = report([{ pass: true, match: false, graphMatch: false }, { pass: false, match: false, graphMatch: false }]);
-  const full = report([{ pass: true, match: false, graphMatch: false }, { pass: true, match: false, graphMatch: false }]);
+  const half = report([{ pass: true }, { pass: false }]);
 
-  // The baseline FAILED k1 on a graph that is not the recorded one. Counted as measured, 50% vs 50%
-  // is a tie and promotes; the bar is taken as if the baseline had passed it — 100% — and a
-  // candidate at 50% is refused.
-  const lowered = decide(report([{ pass: true, match: true, graphMatch: true }, { pass: false, match: false, graphMatch: false }]), half);
-  assert.equal(lowered.pass, false);
+  // BASELINE == RECORDED, UNFAITHFUL REPLAY: the stricter bar. An equal candidate is refused.
+  const unfaithful = decide(report([{ pass: true }, { pass: false, match: false, graphMatch: true }]), half);
+  assert.equal(unfaithful.pass, false);
   assert.equal(
-    lowered.detail,
+    unfaithful.detail,
     "pass rate 50.0% vs baseline 50.0% (Δ 0.0pp) — and the baseline FAILED 1 case(s) whose replay did not reproduce its own " +
       "recording (k1), so the bar is taken as if it had passed them: 100.0% (Δ -50.0pp)",
   );
-  // …and on the recorded graph with `match: false`, and when the replay threw (no report at all).
-  assert.equal(decide(report([{ pass: true, match: true, graphMatch: true }, { pass: false, match: false, graphMatch: true }]), half).pass, false);
-  const threw = report([{ pass: true, match: true, graphMatch: true }, { pass: false, match: true, graphMatch: true }]);
-  (threw.cases[1] as { replay?: unknown }).replay = undefined;
-  assert.equal(decide(threw, half).pass, false);
-  // A candidate that clears even the strictest bar still promotes — `test/cli/promote.test.ts`'s shape.
-  assert.equal(decide(report([{ pass: false, match: false, graphMatch: false }, { pass: false, match: false, graphMatch: false }]), full).pass, true);
-  // A baseline case that PASSED unreproduced holds the bar up as it is — the ordinary `--baseline` edit.
-  assert.equal(decide(full, full).pass, true);
+  // …and a replay that THREW on the recorded graph is the same fact with no report to ask.
+  assert.equal(decide(report([{ pass: true }, { pass: false, threw: true, graphMatch: true }]), half).pass, false);
+
+  // BASELINE != RECORDED: `graph.match` is false on every case by construction, and that is the
+  // operator's choice, not an unfaithful replay. An equal candidate promotes, as it did on base.
+  assert.equal(decide(report([{ pass: true, match: false, graphMatch: false }, { pass: false, match: false, graphMatch: false }]), half).pass, true);
+  assert.equal(decide(report([{ pass: true, graphMatch: false }, { pass: false, threw: true, graphMatch: false }]), half).pass, true);
+
   // A baseline case that failed while REPRODUCING its recording is a real bar, and counts as it is.
-  assert.equal(decide(report([{ pass: true, match: true, graphMatch: true }, { pass: false, match: true, graphMatch: true }]), half).pass, true);
+  assert.equal(decide(report([{ pass: true }, { pass: false }]), half).pass, true);
+  // A candidate that clears even the strictest bar promotes whatever the baseline did.
+  assert.equal(decide(report([{ pass: false, match: false }, { pass: false, threw: true, graphMatch: true }]), report([{ pass: true }, { pass: true }])).pass, true);
+});
+
+test("A.NEW-2, DRIVEN · a baseline whose replay THROWS on its own recorded graph raises the bar; the same failures under an operator-chosen graph do not", async () => {
+  const b = bench();
+  const baseline = b.compile(keep());
+  // An input over the externalisation threshold, so a replay handed no payload store cannot even
+  // submit the recording's inputs: `E_PAYLOAD_UNRESOLVED`, on the recorded graph.
+  const engine = new Engine({ store: b.store, ...b.engineOpts, sleep: async () => {} });
+  const ids: RunId[] = [];
+  for (let i = 0; i < 2; i++) {
+    const runId = await engine.submit({ graph: baseline, inputs: { items: [`${"w".repeat(70_000)}-${String(i)}`, "b"] } });
+    assert.equal((await engine.advance(runId)).status, "succeeded");
+    ids.push(runId);
+  }
+  const suite: EvalSuite = {
+    name: "s",
+    version: 1,
+    frozen: true,
+    frozenAt: 1_000,
+    cases: ids.map((runId, i) => ({ id: `c${String(i)}`, runId, mustPass: false, expect: { status: "succeeded" as const } })),
+  };
+  const { payloads: _dropped, ...noPayloads } = b.engineOpts;
+  const onRecorded = await runEvalSuite({ store: b.store, suite, graph: baseline, engine: noPayloads });
+  for (const c of onRecorded.cases) {
+    assert.equal(c.replay, undefined, "the replay threw");
+    assert.match(c.reasons[0]!, /replay failed: .*externalised/);
+    assert.deepEqual(c.recordedGraph?.match, true, "…on the graph the corpus was recorded with");
+  }
+  // An operator-chosen baseline (a different spec) that throws the same way is not the same fact.
+  const chosen = b.compile({ ...keep(), metadata: { name: "keep-bench", project: "demo", version: 2 } } as unknown as GraphSpec);
+  const onChosen = await runEvalSuite({ store: b.store, suite, graph: chosen, engine: noPayloads });
+  for (const c of onChosen.cases) assert.deepEqual(c.recordedGraph?.match, false);
+
+  const decide = (base: EvalReport) =>
+    gateCandidate({ baseline: base, candidate: onRecorded, postureDiffNonNegative: true, deterministic: true }).checks.find((c) => c.id === "2-non-inferior")!;
+  assert.equal(decide(onRecorded).pass, false, "an equal candidate against an unfaithful baseline: the stricter bar");
+  assert.equal(decide(onChosen).pass, true, "an equal candidate against a baseline the operator chose: measured as it is");
 });
