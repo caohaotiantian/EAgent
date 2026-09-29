@@ -79,7 +79,9 @@ function nodeZooSpec(): GraphSpec {
       // SAMPLE — and a verifier rewrote the predicate as a negative list, silently handing a
       // provider's policy to the three that were missing, with the whole gate green.
       { id: "think", type: "agent", writes: ["thought"], unhandled: true, agent: { profile: "agent_profile/a@stable", prompt: "prompt/p@v1", maxTurns: 1 } },
-      { id: "child", type: "subgraph", writes: ["childOut"], unhandled: true, subgraph: { ref: "subgraph/s@stable" } },
+      // `inputs: {}` / `outputs: {}` since §A.122: a subgraph node's mapping shape is refused
+      // whatever the child resolves to, and this resolver has no `subgraph` hook.
+      { id: "child", type: "subgraph", writes: ["childOut"], unhandled: true, subgraph: { ref: "subgraph/s@stable", inputs: {}, outputs: {} } },
     ],
     edges: [],
   } as unknown as GraphSpec;

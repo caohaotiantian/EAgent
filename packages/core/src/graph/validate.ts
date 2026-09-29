@@ -6733,9 +6733,9 @@ function rule015Resources(spec: GraphSpec, resolver: ResourceResolver, d: Diagno
  *
  * NOT `objectBlock`, and the difference is the whole point of this function: `objectBlock` treats
  * ABSENT as fine, because the `policy` blocks it was written for are optional. These two are not
- * — `SubgraphNode` declares both, and `run/engine.ts`'s `#contextFor` walks `sub.inputs` with the
- * same `Object.entries`, so an absent one is a crash at run time rather than a subgraph that maps
- * nothing. The channel loop in `checkStructure` makes the same distinction the same way, by
+ * — `SubgraphNode` declares both, and `run/engine.ts`'s `#runSubgraph` walks `sub.inputs` and
+ * `sub.outputs` with `Object.entries`, so an absent one is a crash at run time rather than a
+ * subgraph that maps nothing. The channel loop in `checkStructure` makes the same distinction the same way, by
  * reporting the absent case itself rather than letting a `fatal` with no diagnostic behind it
  * reach `compile` as `ok`.
  *
@@ -6788,27 +6788,41 @@ function rule016Subgraphs(
     const sub = n.subgraph;
     if (sub === undefined) continue;
 
-    // THE PARENT-CHANNEL HALF FIRST, BEFORE ANY `continue` BELOW (§A.98). The VALUES of
-    // `sub.inputs` and the KEYS of `sub.outputs` name the PARENT's channels, so whether each is
-    // declared is decidable from this spec alone. This half used to sit after
-    // `if (child === undefined) continue;`, so a ref the resolver could not expand — a resolver
-    // with no `subgraph` hook at all, which is what the test skeleton and a bare
-    // `ResourceResolver` are — skipped it: `inputs: {k: "nope"}` with no channel `nope` compiled
-    // `ok`, and the child was handed `undefined` at run time. The same was true behind a subgraph
-    // CYCLE and past the depth budget. None of those is about the parent's own channel names.
+    // THE PARENT'S HALF FIRST, BEFORE ANY `continue` BELOW (§A.98, §A.122). Everything here is a
+    // fact about THIS spec alone: that `inputs` and `outputs` are channel mappings at all, and
+    // that the VALUES of `sub.inputs` and the KEYS of `sub.outputs` name channels this spec
+    // declares. None of it needs the child, so none of it may depend on whether the child
+    // resolved. Both halves used to sit after `if (child === undefined) continue;`, so a ref the
+    // resolver could not expand skipped them — a resolver with no `subgraph` hook at all (the test
+    // skeleton's, a bare `ResourceResolver`), and on the shipped binary a `subgraph.ref` that
+    // `resolve`s to a resource of another kind (`prompt/p@stable`), which the workspace store's
+    // `subgraph()` answers `undefined`. The same was true behind a subgraph CYCLE and past the
+    // depth budget.
     //
-    // ONLY THE NAMES MOVE, NOT `requiredMapping`'s SHAPE REFUSAL. A mapping that is absent or not
-    // an object is read here as "maps nothing" and left to `requiredMapping` below, which still
-    // runs only for a resolved child — so hoisting this adds no GRAPH003 to a graph that compiled
-    // before. (An ABSENT mapping on an unresolved child is therefore still silent, and still a
-    // crash at run time — `TODO.md` residue, not this row's closing condition.)
+    // §A.98 hoisted the NAMES; §A.122 hoisted `requiredMapping`'s SHAPE refusal, and they are one
+    // rule — "the parent's half" — rather than two. With only the names above the `continue`, one
+    // spec with `subgraph: {ref}` alone compiled `ok` under a hookless resolver and was refused
+    // GRAPH003_MALFORMED under a hooked one, and `inputs: 42` was read as "maps nothing" and
+    // dropped. A spec's shape is not the resolver's to decide.
+    //
+    // WHEN THE SKIP WAS A CRASH, AND WHEN IT WAS NOT (§A.122). This rule and `compile.ts`'s
+    // `resolveSubgraphs` each ask `resolver.subgraph(ref)` — two calls. For a resolver that gives
+    // the same answer twice (the workspace store's), an unresolved child is not frozen into
+    // `RunGraph.subgraphs` either, so the run fails TYPED, `E_RESOURCE_NOT_FOUND` ("does not
+    // resolve to a GraphSpec"), before `#runSubgraph` reads the mapping; driven on the built
+    // binary with a `prompt/…` ref, that is what happens. A resolver whose answer CHANGES between
+    // the two calls — a lazy cache-on-miss one, which `--extension-module` may supply — answered
+    // `undefined` here and the child to the freeze, and the run reached
+    // `Object.entries(sub.inputs)` and failed `E_INTERNAL: TypeError: Cannot convert undefined or
+    // null to object`. Measured in process, `subgraph()` answering `undefined` for its first two
+    // calls. Refusing here, before anything is resolved, closes both.
     //
     // WHY `continue` STILL SKIPS THE CHILD HALF: "which channels does the child declare" needs the
     // child, and an unresolved child is GRAPH015's to report (or, with no `subgraph` hook, nobody
     // can answer it here). The child half stays below the resolution, unchanged.
-    const asMapping = (v: unknown): Readonly<Record<string, unknown>> =>
-      typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Readonly<Record<string, unknown>>) : {};
-    for (const [childCh, parentCh] of Object.entries(asMapping(sub.inputs))) {
+    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
+    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
       if (!Object.hasOwn(spec.channels, parentCh as string)) {
         d.push({
           severity: "error",
@@ -6818,7 +6832,7 @@ function rule016Subgraphs(
         });
       }
     }
-    for (const parentCh of Object.keys(asMapping(sub.outputs))) {
+    for (const parentCh of Object.keys(outputs ?? {})) {
       if (!Object.hasOwn(spec.channels, parentCh)) {
         d.push({
           severity: "error",
@@ -6876,12 +6890,11 @@ function rule016Subgraphs(
     // before this rule, skips a malformed child for the same reason.
     //
     // `SubgraphNode.inputs` and `.outputs` are NOT optional in the type and the executor agrees:
-    // `run/engine.ts` does `Object.entries(sub.inputs)` at `#contextFor` too, so an absent one is
-    // a crash at run time and not a subgraph that maps nothing. Absent is a fault, and it says so.
-    // (Their PARENT-channel names are checked at the top of this loop, above every `continue` —
-    // §A.98; this is the shape refusal and the child half.)
-    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
-    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    // `run/engine.ts`'s `#runSubgraph` does `Object.entries(sub.inputs)` and `(sub.outputs)`, so for
+    // a child that resolves an absent one is a crash at run time and not a subgraph that maps
+    // nothing. Absent is a fault, and it says so. (That refusal, `requiredMapping`, and the parent-channel names
+    // run at the top of this loop, above every `continue` — §A.98, §A.122; below is the child
+    // half only.)
     //
     // NOT A PLAIN OBJECT IS REFUSE, NEVER SKIP, and that distinction was a defect. This used to
     // hand back `undefined` for a child whose `channels` was not a plain object and the mapping
